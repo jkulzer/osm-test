@@ -25,6 +25,10 @@ func isPartOfRoute(tags osm.Tags) bool {
 	return tags.Find("public_transport") == "stop_position" && tags.Find("route") != ""
 }
 
+func isPath(tags osm.Tags) bool {
+	return tags.Find("highway") == "steps" || tags.Find("tunnel") == "building_passage"
+}
+
 func isRoute(tags osm.Tags, route_type string, name string) bool {
 	// return tags.Find("route") == route_type &&
 	return true
@@ -53,6 +57,8 @@ func getPlatforms(file *os.File) {
 	stopPositions := make(map[int64]*osm.Node)
 	routes := make(map[int64]*osm.Relation)
 	ways := make(map[int64]*osm.Way)
+	paths := make(map[int64]*osm.Way)
+	// nodes := make(map[int64]*osm.Node)
 
 	// Create a PBF reader
 	scanner := osmpbf.New(context.Background(), file, 4)
@@ -69,7 +75,7 @@ func getPlatforms(file *os.File) {
 				stopPositions[int64(v.ID)] = v // Store the stop position
 			}
 			if isStopPosition(v.Tags, "Brandenburger Tor") {
-				fmt.Printf("Found stop position (Node): ID=%d, Tags=%v\n", v.ID, v.Tags)
+				// fmt.Printf("Found stop position (Node): ID=%d, Tags=%v\n", v.ID, v.Tags)
 				stopPositions[int64(v.ID)] = v
 			}
 		case *osm.Way:
@@ -81,10 +87,14 @@ func getPlatforms(file *os.File) {
 			if isPlatformWay(v.Tags) {
 				ways[int64(v.ID)] = v // Store the way
 			}
+			if isPath(v.Tags) {
+				// fmt.Printf("Found path (Way): ID=%d, Tags=%v\n", v.ID, v.Tags)
+				paths[int64(v.ID)] = v
+			}
 		case *osm.Relation:
 			// Check if the relation represents a train platform
 			if isTrainPlatformWithName(v.Tags, searchTerm) {
-				fmt.Printf("Found train platform (Relation): ID=%d, Tags=%v\n", v.ID, v.Tags)
+				// fmt.Printf("Found train platform (Relation): ID=%d, Tags=%v\n", v.ID, v.Tags)
 			}
 			if isRoute(v.Tags, "", "") {
 				// fmt.Printf("Found route (Relation): ID=%d, Tags=%v\n", v.ID, v.Tags)
