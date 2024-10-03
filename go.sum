@@ -1,3 +1,5 @@
+github.com/RyanCarrier/dijkstra/v2 v2.0.2 h1:DIOg/a7XDR+KmlDkNSX9ggDY6sNLrG+EBGvZUjfgi+A=
+github.com/RyanCarrier/dijkstra/v2 v2.0.2/go.mod h1:XwpYN7nC1LPwL3HkaavzB+VGaHRndSsZy/whsFy1AEI=
 github.com/datadog/czlib v0.0.0-20160811164712-4bc9a24e37f2 h1:ISaMhBq2dagaoptFGUyywT5SzpysCbHofX3sCNw1djo=
 github.com/datadog/czlib v0.0.0-20160811164712-4bc9a24e37f2/go.mod h1:2yDaWzisHKoQoxm+EU4YgKBaD7g1M0pxy7THWG44Lro=
 github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
