@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
-	"sync"
 	// "github.com/go-chi/chi/v5"
 	// "github.com/go-chi/chi/v5/middleware"
+	mapset "github.com/deckarep/golang-set/v2"
 	"log"
-	"math"
 	"os"
 	// "strconv"
 	"strings"
 
-	// "github.com/jkulzer/osm-test/routes"
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 	"gonum.org/v1/gonum/graph"
@@ -34,35 +32,20 @@ func isPartOfRoute(tags osm.Tags) bool {
 func main() {
 	go func() {
 		http.ListenAndServe("localhost:6060", nil)
-	}()
-	// Open the OSM PBF file
-	file, err := os.Open("berlin-latest.osm.pbf")
+	}() // Open the OSM PBF file
+	file, err := os.Open("berlin-notlatest.osm.pbf")
 	if err != nil {
 		log.Fatal("Error opening the file:", err)
 	}
 	defer file.Close()
 
-	// port := 3000
-
 	// Get platforms and print related train services
 	getPlatforms(file)
-	//
-	// fmt.Println("Listening on :" + strconv.Itoa(port))
-	// r := chi.NewRouter()
-	//
-	// r.Use(middleware.Logger)
-	//
-	// routes.Router(r)
-	//
-	// http.ListenAndServe(":"+strconv.Itoa(port), r)
 
 }
 
 func getPlatforms(file *os.File) {
-	searchTerm := "Brandenburger Tor"
-
-	// var rootRelation *osm.Relation
-	var rootNode *osm.Node
+	searchTerm := "Warschauer Straße"
 
 	// Maps for storing OSM data
 	nodes := make(map[int64]*osm.Node)
@@ -71,9 +54,11 @@ func getPlatforms(file *os.File) {
 	relevantNodes := make(map[int64]*osm.Node)
 	platformWays := make(map[int64]*osm.Way)
 	platformRelations := make(map[int64]*osm.Relation)
+	relevantPlatformWays := mapset.NewSet[*osm.Way]()
+	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
+	footWays := mapset.NewSet[osm.NodeID]()
 
 	stopPositions := make(map[int64]*osm.Node)
-	stopAreas := make(map[int64]*osm.Relation)
 	routes := make(map[int64]*osm.Relation)
 
 	// Create a PBF reader
@@ -88,31 +73,34 @@ func getPlatforms(file *os.File) {
 		switch v := obj.(type) {
 		case *osm.Node:
 			nodes[int64(v.ID)] = v
-			if strings.Contains(v.Tags.Find("name"), searchTerm) {
-				rootNode = v
-			}
+			g.AddNode(simple.Node(v.ID))
 		case *osm.Way:
 			ways[int64(v.ID)] = v
-			if v.Tags.Find("") == "stop_area" {
-				for i := 0; i < len(v.Nodes)-1; i++ {
-					g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), 1))
+			// iterates through every node on every way
+			nodeListLength := len(v.Nodes)
+			for i, node := range v.Nodes {
+
+				// creates an edge for every segment of the way
+				/*
+					If this is on the last node, there are no more segments to create
+					(since the number of edges in a series of edges is node count - 1)
+					and the edge creation must be skipped (otherwise array out of bounds)
+				*/
+				if i+1 != nodeListLength {
 					g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), 1))
+					g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), 1))
+				}
+				// checks if the way is a footpath
+				if v.Tags.Find("highway") == "footway" {
+					footWays.Add(node.ID)
 				}
 			}
 		case *osm.Relation:
 			relations[int64(v.ID)] = v
-			// if strings.Contains(v.Tags.Find("name"), searchTerm) && v.Tags.Find("public_transport") == "stop_area" {
-			if strings.Contains(v.Tags.Find("name"), searchTerm) {
-				stopAreas[int64(v.ID)] = v
-				fmt.Println(v.Tags.Find("name"))
-				// rootRelation = v
-			}
 		default:
 			// Handle other OSM object types if needed
 		}
 	}
-
-	fmt.Println("Root Node has ID " + fmt.Sprint(rootNode.ID))
 
 	// Filter nodes for stop positions
 	for _, v := range nodes {
@@ -129,6 +117,7 @@ func getPlatforms(file *os.File) {
 	for _, v := range ways {
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformWays[int64(v.ID)] = v
+			fmt.Println("platform way: " + v.Tags.Find("name") + " with ID " + fmt.Sprint(v.ID))
 		}
 	}
 
@@ -139,14 +128,24 @@ func getPlatforms(file *os.File) {
 		}
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformRelations[int64(v.ID)] = v
+			fmt.Println("platform relation: " + v.Tags.Find("name") + " with ID " + fmt.Sprint(v.ID))
 		}
 	}
+
+	sourcePlatform := int64(379339107)
+	destPlatform := int64(11765307)
 
 	var sourceNodes []int64
 	var targetNodes []int64
 
+	// ==================================
 	// Match stop positions with services
+	// ==================================
+
+	// iterates through all routes in the entire city
 	for _, route := range routes {
+
+		// iterates through every node that is in a given route
 		for _, routeMember := range route.Members {
 			// for stopID, stopPosition := range stopPositions {
 			// 	if routeMember.Type == osm.TypeNode && stopID == routeMember.Ref {
@@ -158,100 +157,97 @@ func getPlatforms(file *os.File) {
 			// 		)
 			// 	}
 			// }
+
+			// iterates through every platform
 			for platformID, platform := range platformWays {
+
+				// checks if the ID of the platform matches
 				if platformID == routeMember.Ref {
 					fmt.Printf(
 						"Platform %d has Service %s and is Way\n",
 						platform.ID,
 						route.Tags.Find("name"),
 					)
-					for _, node := range platform.Nodes {
-						if platformID == 237221908 {
-							sourceNodes = append(sourceNodes, int64(node.ID))
-						}
-						if platformID == 383076366 {
-							targetNodes = append(targetNodes, int64(node.ID))
-						}
-						fmt.Println("  ID: " + fmt.Sprint(node.ID))
-					}
+					relevantPlatformWays.Add(platform)
 				}
 			}
 			for platformID, platform := range platformRelations {
-				// if routeMember.Type == osm.TypeWay && platformID == routeMember.Ref {
-				if platformID == routeMember.Ref {
-					fmt.Printf(
-						"Platform %d has Service %s and is Relation\n",
-						platform.ID,
-						route.Tags.Find("name"),
-					)
+				if routeMember.Type == "relation" {
+
+					if platformID == int64(routeMember.ElementID().RelationID()) {
+						fmt.Printf(
+							"Platform %d has Service %s and is Relation\n",
+							platform.ID,
+							route.Tags.Find("name"),
+						)
+						relevantPlatformRelations.Add(platform)
+					}
+				}
+			}
+		}
+	}
+	for platform := range relevantPlatformWays.Iterator().C {
+		for _, node := range platform.Nodes {
+			if (nodes[int64(node.ID)].Tags.Find("level") != "") || footWays.Contains(node.ID) {
+				if int64(platform.ID) == sourcePlatform {
+					sourceNodes = append(sourceNodes, int64(node.ID))
+				}
+				if int64(platform.ID) == destPlatform {
+					targetNodes = append(targetNodes, int64(node.ID))
+				}
+			}
+		}
+	}
+	for platform := range relevantPlatformRelations.Iterator().C {
+		for _, member := range platform.Members {
+			if member.Type == "way" {
+				// get a slice off all the member nodes of a way and range over that
+				wayID := member.ElementID().WayID()
+				way := ways[int64(wayID)]
+				for _, wayNode := range way.Nodes {
+					// since way nodes don't have tags i need to find the original node in the map
+					node := nodes[int64(wayNode.ID)]
+					if (nodes[int64(node.ID)].Tags.Find("level") != "") || footWays.Contains(node.ID) {
+						if int64(platform.ID) == sourcePlatform {
+							sourceNodes = append(sourceNodes, int64(node.ID))
+						}
+						if int64(platform.ID) == destPlatform {
+							targetNodes = append(targetNodes, int64(node.ID))
+						}
+					}
 				}
 			}
 		}
 	}
 
-	i := 0
+	fmt.Println("source nodes:")
+	fmt.Println(sourceNodes)
+	fmt.Println("target nodes:")
+	fmt.Println(targetNodes)
 
-	for _, node := range relevantNodes {
-		i++
-		// fmt.Println("Node with ID " + fmt.Sprint(node.ID) + " and name " + node.Tags.Find("name"))
-		g.AddNode(simple.Node(node.ID))
-		if node.ID == 2400549248 || node.ID == 2400549255 {
-			// fmt.Println("GOTTEM")
-		}
-	}
-	fmt.Println("Number of nodes: " + fmt.Sprint(i))
-
-	i = 0
-	for _, _ = range ways {
-		i++
-		// fmt.Println("Way with ID " + fmt.Sprint(way.ID) + " and name " + way.Tags.Find("name"))
-	}
-	fmt.Println("Number of ways: " + fmt.Sprint(i))
-
-	// route := path.DijkstraFrom(simple.Node(5234612423), g)
+	// route := path.DijkstraFrom(simple.Node(sourceNodes[0]), g)
 	//
-	// fmt.Println(route.To(5234612350))
-	var wg sync.WaitGroup
-	shortestPathChan := make(chan []graph.Node)
-	minDistanceChan := make(chan float64)
+	// fmt.Println(route.To(targetNodes[0]))
 
-	for _, source := range sourceNodes {
-		wg.Add(1)
-		go func(source int64) {
-			defer wg.Done()
-			for _, target := range targetNodes {
-				paths := path.DijkstraFrom(g.Node(source), g)
-				pathToTarget, distance := paths.To(target)
-				minDistanceChan <- distance
-				shortestPathChan <- pathToTarget
-			}
-		}(source)
-	}
-
-	go func() {
-		wg.Wait()
-		close(shortestPathChan)
-		close(minDistanceChan)
-	}()
-
-	minDistance := math.Inf(1)
 	var shortestPath []graph.Node
-	for dist := range minDistanceChan {
-		if dist < minDistance {
-			minDistance = dist
-			shortestPath = <-shortestPathChan
+	var shortestWeight float64
+
+	for _, sourceID := range sourceNodes {
+		// Compute the shortest path tree from the source node
+		shortest := path.DijkstraFrom(g.Node(sourceID), g)
+
+		// Extract shortest paths to the destination nodes
+		for _, destID := range targetNodes {
+			if path, weight := shortest.To(destID); len(path) > 0 {
+				shortestPath = path
+				shortestWeight = weight
+			}
 		}
 	}
-
-	fmt.Println("Shortest path")
-	fmt.Println(shortestPath)
+	fmt.Printf("Shortest path: %v (weight: %v)\n", shortestPath, shortestWeight)
 
 	// Handle any errors that occurred during scanning
 	if err := scanner.Err(); err != nil {
 		log.Fatalf("Error reading OSM PBF file: %v", err)
 	}
-}
-
-func getPlatformEdges() {
-
 }

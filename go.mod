@@ -10,6 +10,7 @@ require (
 require (
 	github.com/a-h/templ v0.2.778 // indirect
 	github.com/datadog/czlib v0.0.0-20160811164712-4bc9a24e37f2 // indirect
+	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/go-chi/chi/v5 v5.1.0 // indirect
 	github.com/paulmach/orb v0.1.3 // indirect
 	github.com/paulmach/protoscan v0.2.1 // indirect
