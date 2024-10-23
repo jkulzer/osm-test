@@ -3,14 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/fatih/color"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
+	"strconv"
 	// "github.com/go-chi/chi/v5"
 	// "github.com/go-chi/chi/v5/middleware"
 	mapset "github.com/deckarep/golang-set/v2"
 	"log"
 	"os"
-	// "strconv"
 	"strings"
 
 	"github.com/paulmach/osm"
@@ -18,7 +20,21 @@ import (
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
+	// "fyne.io/fyne/v2/app"
+	// "fyne.io/fyne/v2/widget"
 )
+
+type GenericPlatform struct {
+	Services mapset.Set[*osm.Relation]
+}
+
+type PlatformKey struct {
+	Type osm.Type
+	ID   int64
+}
+
+type WayPlatform struct {
+}
 
 func isStopPosition(tags osm.Tags, name string) bool {
 	return tags.Find("public_transport") == "stop_position" && strings.Contains(tags.Find("name"), name)
@@ -30,10 +46,20 @@ func isPartOfRoute(tags osm.Tags) bool {
 }
 
 func main() {
+	fmt.Println("Data from:")
+	fmt.Println("© OpenStreetMap contributors: https://openstreetmap.org/copyright")
 	go func() {
 		http.ListenAndServe("localhost:6060", nil)
-	}() // Open the OSM PBF file
-	file, err := os.Open("berlin-notlatest.osm.pbf")
+	}()
+
+	// a := app.New()
+	// w := a.NewWindow("Hello World")
+	//
+	// w.SetContent(widget.NewLabel("Hello World!"))
+	// w.ShowAndRun()
+
+	// Open the OSM PBF file
+	file, err := os.Open("berlin-latest.osm.pbf")
 	if err != nil {
 		log.Fatal("Error opening the file:", err)
 	}
@@ -44,8 +70,30 @@ func main() {
 
 }
 
+func Haversine(lat1, lon1, lat2, lon2 float64) float64 {
+	// Convert degrees to radians
+	const earthRadius = 6371 // Earth's radius in kilometers
+	lat1Rad := lat1 * math.Pi / 180
+	lon1Rad := lon1 * math.Pi / 180
+	lat2Rad := lat2 * math.Pi / 180
+	lon2Rad := lon2 * math.Pi / 180
+
+	// Haversine formula
+	dLat := lat2Rad - lat1Rad
+	dLon := lon2Rad - lon1Rad
+
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	// Distance in kilometers
+	return earthRadius * c
+}
+
 func getPlatforms(file *os.File) {
-	searchTerm := "Warschauer Straße"
+	searchTerm := "Brandenburger Tor"
 
 	// Maps for storing OSM data
 	nodes := make(map[int64]*osm.Node)
@@ -57,6 +105,8 @@ func getPlatforms(file *os.File) {
 	relevantPlatformWays := mapset.NewSet[*osm.Way]()
 	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
 	footWays := mapset.NewSet[osm.NodeID]()
+
+	platforms := make(map[PlatformKey]GenericPlatform)
 
 	stopPositions := make(map[int64]*osm.Node)
 	routes := make(map[int64]*osm.Relation)
@@ -87,8 +137,30 @@ func getPlatforms(file *os.File) {
 					and the edge creation must be skipped (otherwise array out of bounds)
 				*/
 				if i+1 != nodeListLength {
-					g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), 1))
-					g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), 1))
+					if v.Tags.Find("highway") == "footway" || v.Tags.Find("highway") == "steps" {
+						thisNode := nodes[int64(v.Nodes[i].ID)]
+						nextNode := nodes[int64(v.Nodes[i+1].ID)]
+						nodeDistance := Haversine(thisNode.Lat, thisNode.Lon, nextNode.Lat, nextNode.Lon)
+						fmt.Println()
+						// disable routing through elevators
+						// if thisNode.Tags.Find("highway") == "elevator" || nextNode.Tags.Find("highway") == "elevator" {
+						// } else {
+
+						// TODO: Add very high penalty for walking in the wrong direction of an escalator
+
+						// only allow walking along escalators the right direction
+						if v.Tags.Find("conveying") != "" && v.Tags.Find("conveying") == "forward" {
+							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), nodeDistance*0.5))
+						} else if v.Tags.Find("conveying") != "" && v.Tags.Find("conveying") == "backward" {
+							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), nodeDistance*0.5))
+
+						} else {
+							// if it is only a basic walkway
+							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), nodeDistance))
+							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), nodeDistance))
+						}
+						// }
+					}
 				}
 				// checks if the way is a footpath
 				if v.Tags.Find("highway") == "footway" {
@@ -117,7 +189,12 @@ func getPlatforms(file *os.File) {
 	for _, v := range ways {
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformWays[int64(v.ID)] = v
-			fmt.Println("platform way: " + v.Tags.Find("name") + " with ID " + fmt.Sprint(v.ID))
+
+			// adds to the generic platform list
+			platformKey := PlatformKey{Type: osm.TypeWay, ID: int64(v.ID)}
+			platforms[platformKey] = GenericPlatform{
+				Services: mapset.NewSet[*osm.Relation](),
+			}
 		}
 	}
 
@@ -128,12 +205,20 @@ func getPlatforms(file *os.File) {
 		}
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformRelations[int64(v.ID)] = v
-			fmt.Println("platform relation: " + v.Tags.Find("name") + " with ID " + fmt.Sprint(v.ID))
+
+			// adds to the generic platform list
+			platformKey := PlatformKey{Type: osm.TypeRelation, ID: int64(v.ID)}
+			platforms[platformKey] = GenericPlatform{
+				Services: mapset.NewSet[*osm.Relation](),
+			}
 		}
 	}
 
-	sourcePlatform := int64(379339107)
-	destPlatform := int64(11765307)
+	sourcePlatform := int64(237221908)
+	destPlatform := int64(11762778)
+	// Warschauer Strasse test
+	// sourcePlatform := int64(11765307)
+	// destPlatform := int64(379339107)
 
 	var sourceNodes []int64
 	var targetNodes []int64
@@ -163,29 +248,57 @@ func getPlatforms(file *os.File) {
 
 				// checks if the ID of the platform matches
 				if platformID == routeMember.Ref {
-					fmt.Printf(
-						"Platform %d has Service %s and is Way\n",
-						platform.ID,
-						route.Tags.Find("name"),
-					)
 					relevantPlatformWays.Add(platform)
+
+					platformKey := PlatformKey{Type: osm.TypeWay, ID: int64(platform.ID)}
+					platforms[platformKey].Services.Add(route)
+
 				}
 			}
 			for platformID, platform := range platformRelations {
 				if routeMember.Type == "relation" {
 
 					if platformID == int64(routeMember.ElementID().RelationID()) {
-						fmt.Printf(
-							"Platform %d has Service %s and is Relation\n",
-							platform.ID,
-							route.Tags.Find("name"),
-						)
 						relevantPlatformRelations.Add(platform)
+
+						platformKey := PlatformKey{Type: osm.TypeRelation, ID: int64(platform.ID)}
+						platforms[platformKey].Services.Add(route)
 					}
 				}
 			}
 		}
 	}
+
+	for platformKey, genericPlatform := range platforms {
+		switch platformKey.Type {
+		case osm.TypeWay:
+			fmt.Println("Platform " + platformWays[platformKey.ID].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:")
+		case osm.TypeRelation:
+			fmt.Println("Platform " + platformRelations[platformKey.ID].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:")
+		}
+		for service := range genericPlatform.Services.Iterator().C {
+			printData := service.Tags.Find("name") + " with operator " + service.Tags.Find("operator") + " and vehicle type " + service.Tags.Find("route")
+			if len(service.Tags.Find("colour")) == 7 {
+
+				red, err := strconv.ParseInt(service.Tags.Find("colour")[1:3], 16, 16)
+				if err != nil {
+					fmt.Println("failed decoding line color")
+				}
+				green, err := strconv.ParseInt(service.Tags.Find("colour")[3:5], 16, 16)
+				if err != nil {
+					fmt.Println("failed decoding line color")
+				}
+				blue, err := strconv.ParseInt(service.Tags.Find("colour")[5:7], 16, 16)
+				if err != nil {
+					fmt.Println("failed decoding line color")
+				}
+				color.RGB(255, 255, 255).AddBgRGB(int(red), int(green), int(blue)).Println(printData)
+			} else {
+				fmt.Println(printData)
+			}
+		}
+	}
+
 	for platform := range relevantPlatformWays.Iterator().C {
 		for _, node := range platform.Nodes {
 			if (nodes[int64(node.ID)].Tags.Find("level") != "") || footWays.Contains(node.ID) {
@@ -224,10 +337,6 @@ func getPlatforms(file *os.File) {
 	fmt.Println(sourceNodes)
 	fmt.Println("target nodes:")
 	fmt.Println(targetNodes)
-
-	// route := path.DijkstraFrom(simple.Node(sourceNodes[0]), g)
-	//
-	// fmt.Println(route.To(targetNodes[0]))
 
 	var shortestPath []graph.Node
 	var shortestWeight float64
