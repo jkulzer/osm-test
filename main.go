@@ -20,6 +20,7 @@ import (
 
 	"github.com/fatih/color"
 
+	// "github.com/paulmach/orb"
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 
@@ -29,6 +30,17 @@ import (
 	// "fyne.io/fyne/v2/app"
 	// "fyne.io/fyne/v2/widget"
 )
+
+type GeoJSON struct {
+	Type       string      `json:"type"`
+	Geometry   Geometry    `json:"geometry"`
+	Properties interface{} `json:"properties"`
+}
+
+type Geometry struct {
+	Type        string      `json:"type"`
+	Coordinates [][]float64 `json:"coordinates"` // For LineString
+}
 
 type GenericPlatform struct {
 	Services mapset.Set[*osm.Relation]
@@ -99,6 +111,9 @@ func Haversine(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 func getPlatforms(file *os.File) {
+
+	// maxDistance := 0.000000001
+	// maxDistance := 0.0
 	searchTerm := "Warschauer Straße"
 
 	// Maps for storing OSM data
@@ -110,6 +125,8 @@ func getPlatforms(file *os.File) {
 	relevantPlatformWays := mapset.NewSet[*osm.Way]()
 	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
 	footWays := mapset.NewSet[osm.NodeID]()
+
+	// var trainTracks []orb.LineString
 
 	platforms := make(map[PlatformKey]GenericPlatform)
 
@@ -148,23 +165,23 @@ func getPlatforms(file *os.File) {
 						nextNode := nodes[int64(v.Nodes[i+1].ID)]
 						nodeDistance := Haversine(thisNode.Lat, thisNode.Lon, nextNode.Lat, nextNode.Lon)
 						// disable routing through elevators
-						// if thisNode.Tags.Find("highway") == "elevator" || nextNode.Tags.Find("highway") == "elevator" {
-						// } else {
-
-						// TODO: Add very high penalty for walking in the wrong direction of an escalator
-
-						// only allow walking along escalators the right direction
-						if v.Tags.Find("conveying") != "" && v.Tags.Find("conveying") == "forward" {
-							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), nodeDistance*0.5))
-						} else if v.Tags.Find("conveying") != "" && v.Tags.Find("conveying") == "backward" {
-							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), nodeDistance*0.5))
-
+						if thisNode.Tags.Find("highway") == "elevator" || nextNode.Tags.Find("highway") == "elevator" {
 						} else {
-							// if it is only a basic walkway
-							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), nodeDistance))
-							g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), nodeDistance))
+
+							// TODO: Add very high penalty for walking in the wrong direction of an escalator
+
+							// only allow walking along escalators the right direction
+							if v.Tags.Find("conveying") != "" && v.Tags.Find("conveying") == "forward" {
+								g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), nodeDistance*0.5))
+							} else if v.Tags.Find("conveying") != "" && v.Tags.Find("conveying") == "backward" {
+								g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), nodeDistance*0.5))
+
+							} else {
+								// if it is only a basic walkway
+								g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i].ID), simple.Node(v.Nodes[i+1].ID), nodeDistance))
+								g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(v.Nodes[i+1].ID), simple.Node(v.Nodes[i].ID), nodeDistance))
+							}
 						}
-						// }
 					}
 				}
 				// checks if the way is a footpath
@@ -193,6 +210,21 @@ func getPlatforms(file *os.File) {
 
 	// Filter ways for platforms and paths
 	for _, v := range ways {
+
+		// platform proximity calculation
+		railwayTag := v.Tags.Find("railway")
+		validRailwayTags := map[string]bool{
+			"rail":         true,
+			"light_rail":   true,
+			"tram":         true,
+			"subway":       true,
+			"narrow_gauge": true,
+			"monorail":     true,
+		}
+		if validRailwayTags[railwayTag] {
+			// trainTracks = append(trainTracks, osmWayToLineString(v, nodes)) // convert OSM way to orb.LineString
+		}
+
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformWays[int64(v.ID)] = v
 
@@ -247,16 +279,16 @@ func getPlatforms(file *os.File) {
 
 		// iterates through every node that is in a given route
 		for _, routeMember := range route.Members {
-			// for stopID, stopPosition := range stopPositions {
-			// 	if routeMember.Type == osm.TypeNode && stopID == routeMember.Ref {
-			// 		fmt.Printf(
-			// 			"Stop: %s with service %s on platform %s\n",
-			// 			stopPosition.Tags.Find("name"),
-			// 			route.Tags.Find("name"),
-			// 			stopPosition.Tags.Find("local_ref"),
-			// 		)
-			// 	}
-			// }
+			for stopID, stopPosition := range stopPositions {
+				if routeMember.Type == osm.TypeNode && stopID == routeMember.Ref {
+					fmt.Printf(
+						"Stop: %s with service %s with ID %d\n",
+						stopPosition.Tags.Find("name"),
+						route.Tags.Find("name"),
+						stopPosition.ID,
+					)
+				}
+			}
 
 			// iterates through every platform
 			for platformID, platform := range platformWays {
@@ -335,6 +367,7 @@ func getPlatforms(file *os.File) {
 				}
 			}
 		}
+
 	}
 	for platform := range relevantPlatformRelations.Iterator().C {
 		for _, member := range platform.Members {
@@ -415,15 +448,4 @@ func getPlatforms(file *os.File) {
 	if err := scanner.Err(); err != nil {
 		log.Fatalf("Error reading OSM PBF file: %v", err)
 	}
-}
-
-type GeoJSON struct {
-	Type       string      `json:"type"`
-	Geometry   Geometry    `json:"geometry"`
-	Properties interface{} `json:"properties"`
-}
-
-type Geometry struct {
-	Type        string      `json:"type"`
-	Coordinates [][]float64 `json:"coordinates"` // For LineString
 }
