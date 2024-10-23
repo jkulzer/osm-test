@@ -2,21 +2,27 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/fatih/color"
+	"log"
 	"math"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"strconv"
+	"strings"
+	"time"
+
 	// "github.com/go-chi/chi/v5"
 	// "github.com/go-chi/chi/v5/middleware"
+
 	mapset "github.com/deckarep/golang-set/v2"
-	"log"
-	"os"
-	"strings"
+
+	"github.com/fatih/color"
 
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
+
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
@@ -93,13 +99,12 @@ func Haversine(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 func getPlatforms(file *os.File) {
-	searchTerm := "Brandenburger Tor"
+	searchTerm := "Warschauer Straße"
 
 	// Maps for storing OSM data
 	nodes := make(map[int64]*osm.Node)
 	ways := make(map[int64]*osm.Way)
 	relations := make(map[int64]*osm.Relation)
-	relevantNodes := make(map[int64]*osm.Node)
 	platformWays := make(map[int64]*osm.Way)
 	platformRelations := make(map[int64]*osm.Relation)
 	relevantPlatformWays := mapset.NewSet[*osm.Way]()
@@ -114,6 +119,7 @@ func getPlatforms(file *os.File) {
 	// Create a PBF reader
 	scanner := osmpbf.New(context.Background(), file, 4)
 	g := simple.NewWeightedDirectedGraph(1, 0)
+	start := time.Now()
 
 	// Scan and populate the relations map
 	for scanner.Scan() {
@@ -141,7 +147,6 @@ func getPlatforms(file *os.File) {
 						thisNode := nodes[int64(v.Nodes[i].ID)]
 						nextNode := nodes[int64(v.Nodes[i+1].ID)]
 						nodeDistance := Haversine(thisNode.Lat, thisNode.Lon, nextNode.Lat, nextNode.Lon)
-						fmt.Println()
 						// disable routing through elevators
 						// if thisNode.Tags.Find("highway") == "elevator" || nextNode.Tags.Find("highway") == "elevator" {
 						// } else {
@@ -173,10 +178,11 @@ func getPlatforms(file *os.File) {
 			// Handle other OSM object types if needed
 		}
 	}
+	elapsed := time.Since(start)
+	log.Printf("Parsing took %s", elapsed)
 
 	// Filter nodes for stop positions
 	for _, v := range nodes {
-		relevantNodes[int64(v.ID)] = v
 		// if isPartOfRoute(v.Tags) {
 		// 	stopPositions[int64(v.ID)] = v // Store the stop position
 		// }
@@ -214,11 +220,20 @@ func getPlatforms(file *os.File) {
 		}
 	}
 
-	sourcePlatform := int64(237221908)
-	destPlatform := int64(11762778)
-	// Warschauer Strasse test
-	// sourcePlatform := int64(11765307)
-	// destPlatform := int64(379339107)
+	elapsed = time.Since(start)
+	log.Printf("Postprocessing took %s", elapsed)
+
+	// Brandenburger Tor Test
+	// sourcePlatform := int64(237221908)
+	// destPlatform := int64(11762778)
+
+	// Warschauer Strasse Test
+	sourcePlatform := int64(11765307)
+	destPlatform := int64(379339107)
+
+	// Prinzenstraße Test
+	// sourcePlatform := int64(49038087)
+	// destPlatform := int64(49038086)
 
 	var sourceNodes []int64
 	var targetNodes []int64
@@ -268,13 +283,23 @@ func getPlatforms(file *os.File) {
 			}
 		}
 	}
+	elapsed = time.Since(start)
+	log.Printf("Matching took %s", elapsed)
+
+	platformData := color.New(color.Bold, color.FgWhite).PrintlnFunc()
 
 	for platformKey, genericPlatform := range platforms {
 		switch platformKey.Type {
 		case osm.TypeWay:
-			fmt.Println("Platform " + platformWays[platformKey.ID].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:")
+			data := "Platform " + platformWays[platformKey.ID].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:"
+			platformData(strings.Repeat("=", len(data)))
+			platformData(data)
+			platformData(strings.Repeat("=", len(data)))
 		case osm.TypeRelation:
-			fmt.Println("Platform " + platformRelations[platformKey.ID].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:")
+			data := "Platform " + platformRelations[platformKey.ID].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:"
+			platformData(strings.Repeat("=", len(data)))
+			platformData(data)
+			platformData(strings.Repeat("=", len(data)))
 		}
 		for service := range genericPlatform.Services.Iterator().C {
 			printData := service.Tags.Find("name") + " with operator " + service.Tags.Find("operator") + " and vehicle type " + service.Tags.Find("route")
@@ -355,8 +380,50 @@ func getPlatforms(file *os.File) {
 	}
 	fmt.Printf("Shortest path: %v (weight: %v)\n", shortestPath, shortestWeight)
 
+	geo := GeoJSON{
+		Type: "Feature",
+		Geometry: Geometry{
+			Type: "LineString",
+		},
+	}
+
+	for _, node := range shortestPath {
+		// Assuming the node ID corresponds to the OSM node ID
+		if coord, exists := nodes[node.ID()]; exists {
+			geo.Geometry.Coordinates = append(geo.Geometry.Coordinates, []float64{coord.Lon, coord.Lat})
+		}
+	}
+
+	file, err := os.Create("path.geojson")
+	if err != nil {
+		fmt.Println("Error creating file:", err)
+		return
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(geo); err != nil {
+		fmt.Println("Error encoding GeoJSON:", err)
+		return
+	}
+
+	elapsed = time.Since(start)
+	log.Printf("Done in %s", elapsed)
+
 	// Handle any errors that occurred during scanning
 	if err := scanner.Err(); err != nil {
 		log.Fatalf("Error reading OSM PBF file: %v", err)
 	}
+}
+
+type GeoJSON struct {
+	Type       string      `json:"type"`
+	Geometry   Geometry    `json:"geometry"`
+	Properties interface{} `json:"properties"`
+}
+
+type Geometry struct {
+	Type        string      `json:"type"`
+	Coordinates [][]float64 `json:"coordinates"` // For LineString
 }
