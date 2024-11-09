@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/golang/geo/s2"
 	"log"
 	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jkulzer/osm-test/linebound"
 
 	// "github.com/go-chi/chi/v5"
 	// "github.com/go-chi/chi/v5/middleware"
@@ -20,7 +24,9 @@ import (
 
 	"github.com/fatih/color"
 
-	// "github.com/paulmach/orb"
+	"github.com/paulmach/orb"
+	"github.com/paulmach/orb/geo"
+	orbGeojson "github.com/paulmach/orb/geojson"
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 
@@ -90,7 +96,6 @@ func main() {
 
 func Haversine(lat1, lon1, lat2, lon2 float64) float64 {
 	// Convert degrees to radians
-	const earthRadius = 6371 // Earth's radius in kilometers
 	lat1Rad := lat1 * math.Pi / 180
 	lon1Rad := lon1 * math.Pi / 180
 	lat2Rad := lat2 * math.Pi / 180
@@ -107,14 +112,14 @@ func Haversine(lat1, lon1, lat2, lon2 float64) float64 {
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
 	// Distance in kilometers
-	return earthRadius * c
+	return orb.EarthRadius * c
 }
 
 func getPlatforms(file *os.File) {
 
 	// maxDistance := 0.000000001
 	// maxDistance := 0.0
-	searchTerm := "Warschauer Straße"
+	searchTerm := "Prinzenstraße"
 
 	// Maps for storing OSM data
 	nodes := make(map[int64]*osm.Node)
@@ -126,12 +131,13 @@ func getPlatforms(file *os.File) {
 	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
 	footWays := mapset.NewSet[osm.NodeID]()
 
-	// var trainTracks []orb.LineString
-
 	platforms := make(map[PlatformKey]GenericPlatform)
 
 	stopPositions := make(map[int64]*osm.Node)
 	routes := make(map[int64]*osm.Relation)
+
+	// train tracks (platform edge detection)
+	var trainTracks []orb.Ring
 
 	// Create a PBF reader
 	scanner := osmpbf.New(context.Background(), file, 4)
@@ -222,7 +228,26 @@ func getPlatforms(file *os.File) {
 			"monorail":     true,
 		}
 		if validRailwayTags[railwayTag] {
-			// trainTracks = append(trainTracks, osmWayToLineString(v, nodes)) // convert OSM way to orb.LineString
+			// for the first run, there's no previous node, therefore the firstRun variables is true
+			var prevPoint orb.Point
+			firstRun := true
+			for _, node := range v.Nodes {
+				if firstRun != true {
+					var point orb.Point
+					point[0] = nodes[int64(node.ID)].Lon
+					point[1] = nodes[int64(node.ID)].Lat
+					// the third argumenti is how big the bound is around the line
+					localBound := orb.Ring(linebound.GetRotatedBoundWithPad(prevPoint, point, 3))
+					trainTracks = append(trainTracks, localBound)
+					prevPoint = point
+				} else {
+					var point orb.Point
+					point[0] = nodes[int64(node.ID)].Lon
+					point[1] = nodes[int64(node.ID)].Lat
+					prevPoint = point
+					firstRun = false
+				}
+			}
 		}
 
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
@@ -260,12 +285,16 @@ func getPlatforms(file *os.File) {
 	// destPlatform := int64(11762778)
 
 	// Warschauer Strasse Test
-	sourcePlatform := int64(11765307)
-	destPlatform := int64(379339107)
+	// sourcePlatform := int64(11765307)
+	// destPlatform := int64(379339107)
 
 	// Prinzenstraße Test
-	// sourcePlatform := int64(49038087)
-	// destPlatform := int64(49038086)
+	sourcePlatform := int64(49038087)
+	destPlatform := int64(49038086)
+
+	// Alexanderplatz Test
+	// sourcePlatform := int64(3637944)
+	// destPlatform := int64(3637412)
 
 	var sourceNodes []int64
 	var targetNodes []int64
@@ -279,16 +308,16 @@ func getPlatforms(file *os.File) {
 
 		// iterates through every node that is in a given route
 		for _, routeMember := range route.Members {
-			for stopID, stopPosition := range stopPositions {
-				if routeMember.Type == osm.TypeNode && stopID == routeMember.Ref {
-					fmt.Printf(
-						"Stop: %s with service %s with ID %d\n",
-						stopPosition.Tags.Find("name"),
-						route.Tags.Find("name"),
-						stopPosition.ID,
-					)
-				}
-			}
+			// for stopID, stopPosition := range stopPositions {
+			// 	if routeMember.Type == osm.TypeNode && stopID == routeMember.Ref {
+			// 		fmt.Printf(
+			// 			"Stop: %s with service %s with ID %d\n",
+			// 			stopPosition.Tags.Find("name"),
+			// 			route.Tags.Find("name"),
+			// 			stopPosition.ID,
+			// 		)
+			// 	}
+			// }
 
 			// iterates through every platform
 			for platformID, platform := range platformWays {
@@ -356,7 +385,125 @@ func getPlatforms(file *os.File) {
 		}
 	}
 
+	fc := orbGeojson.NewFeatureCollection()
+	for _, lineString := range trainTracks {
+		feature := orbGeojson.NewFeature(lineString)
+		fc.Append(feature)
+	}
+	geojsonData, err2 := json.MarshalIndent(fc, "", "  ")
+	if err2 != nil {
+		fmt.Println("Error marshalling to GeoJSON")
+		return
+	}
+	file, err4 := os.Create("train_tracks.geojson")
+	if err4 != nil {
+		fmt.Println("Error creating file")
+		return
+	}
+	defer file.Close()
+
+	// Write the GeoJSON data to the file
+	_, err3 := file.Write(geojsonData)
+	if err3 != nil {
+		fmt.Println("Error writing to file")
+		return
+	}
+
+	platformWaySpines := make(map[osm.WayID][2]orb.Point)
+
 	for platform := range relevantPlatformWays.Iterator().C {
+		platformNodeLength := len(platform.Nodes)
+		nodeCloseness := make([]bool, platformNodeLength)
+
+		fmt.Println("Platform: " + fmt.Sprint(platform.Tags.Find("name")) + " with ID: " + fmt.Sprint(platform.ID))
+		currentSpine := platformWaySpines[platform.ID]
+		if platform.Tags.Find("area") == "yes" {
+			for index, node := range platform.Nodes {
+				for _, bound := range trainTracks {
+					_, err := linebound.IsPointInRectangle(bound, linebound.NodeToPoint(*nodes[int64(node.ID)]))
+					isCloseToRails, err := linebound.IsPointInRectangle(bound, linebound.NodeToPoint(*nodes[int64(node.ID)]))
+					if err != nil {
+						fmt.Println("Failed to check if platform " + fmt.Sprint(platform.ID) + " is inside of bound")
+					}
+					if isCloseToRails {
+						nodeCloseness[index] = isCloseToRails
+					} else {
+						if nodeCloseness[index] == true {
+						} else {
+							nodeCloseness[index] = false
+						}
+					}
+				}
+			}
+			startingPoint := 0
+			for index, value := range nodeCloseness {
+				if value == false {
+					startingPoint = index
+					break
+				} else {
+					fmt.Println("all nodes inside of bounds")
+				}
+			}
+			toMove := nodeCloseness[0:startingPoint]
+			slices.Delete(nodeCloseness, 0, startingPoint)
+			nodeCloseness = append(nodeCloseness, toMove...)
+
+			platformNodes := make([]osm.WayNode, len(platform.Nodes))
+			copy(platformNodes, platform.Nodes)
+
+			platformNodesToMove := platformNodes[0:startingPoint]
+			slices.Delete(platformNodes, 0, startingPoint)
+			platformNodes = append(platformNodes, platformNodesToMove...)
+
+			longestStart := -1
+			longestEnd := -1
+			localStart := -1
+			localEnd := -1
+			for index, value := range nodeCloseness {
+				if value {
+					if localStart < 0 {
+						localStart = index
+						localEnd = index
+					} else if nodeCloseness[index-1] == false {
+						localStart = index
+						localEnd = index
+					} else {
+						localEnd++
+					}
+				} else {
+					if localStart >= 0 {
+						if nodeCloseness[index-1] {
+							if localEnd-localStart > longestEnd-longestStart {
+								longestStart = localStart
+								longestEnd = localEnd
+							}
+						}
+					}
+				}
+			}
+
+			// if longestStart != 0 && longestEnd != 0 {
+			relevantNodes := platformNodes[longestStart : longestEnd+1]
+			fmt.Println(relevantNodes)
+
+			var spinePoints [2]orb.Point
+			firstNode := nodes[int64(relevantNodes[0].ID)]
+			lastNode := nodes[int64(relevantNodes[len(relevantNodes)-1].ID)]
+			firstPoint := linebound.NodeToPoint(*firstNode)
+			lastPoint := linebound.NodeToPoint(*lastNode)
+			// fmt.Println("spine points:")
+			// fmt.Println("first node id: " + fmt.Sprint(firstNode.ID) + " with lat: " + fmt.Sprint(firstNode.Lat) + " and lon: " + fmt.Sprint(firstNode.Lon))
+			spinePoints[0] = firstPoint
+			spinePoints[1] = lastPoint
+
+			platformWaySpines[platform.ID] = spinePoints
+			// }
+		} else {
+			startNode := linebound.NodeToPoint(*nodes[int64(platform.Nodes[0].ID)])
+			endNode := linebound.NodeToPoint(*nodes[int64(platform.Nodes[len(platform.Nodes)-1].ID)])
+			currentSpine[0] = startNode
+			currentSpine[1] = endNode
+		}
 		for _, node := range platform.Nodes {
 			if (nodes[int64(node.ID)].Tags.Find("level") != "") || footWays.Contains(node.ID) {
 				if int64(platform.ID) == sourcePlatform {
@@ -412,6 +559,59 @@ func getPlatforms(file *os.File) {
 		}
 	}
 	fmt.Printf("Shortest path: %v (weight: %v)\n", shortestPath, shortestWeight)
+
+	var sourceExit osm.Node
+	sourceExitFound := false
+	var destExit osm.Node
+	for _, graphNode := range shortestPath {
+		node := nodes[graphNode.ID()]
+		if node.Tags.Find("level") != "" {
+			if sourceExitFound == false {
+				sourceExitFound = true
+				sourceExit = *node
+			}
+			destExit = *node
+		}
+	}
+
+	sourceSpine := platformWaySpines[osm.WayID(sourcePlatform)]
+	destSpine := platformWaySpines[osm.WayID(destPlatform)]
+
+	sourcePoint0 := linebound.OrbPointToGeoPoint(sourceSpine[0])
+	sourcePoint1 := linebound.OrbPointToGeoPoint(sourceSpine[1])
+
+	destPoint0 := linebound.OrbPointToGeoPoint(destSpine[0])
+	destPoint1 := linebound.OrbPointToGeoPoint(destSpine[1])
+
+	sourceExitPoint := linebound.OrbPointToGeoPoint(linebound.NodeToPoint(sourceExit))
+	destExitPoint := linebound.OrbPointToGeoPoint(linebound.NodeToPoint(destExit))
+
+	sourcePlatformEdgePoint := s2.Project(sourceExitPoint, sourcePoint0, sourcePoint1)
+	destPlatformEdgePoint := s2.Project(destExitPoint, destPoint0, destPoint1)
+
+	sourceOptimalDoor := linebound.GeoPointToOrbPoint(sourcePlatformEdgePoint)
+	destOptimalDoor := linebound.GeoPointToOrbPoint(destPlatformEdgePoint)
+	fmt.Println("optimal spots:")
+	fmt.Println(sourceOptimalDoor)
+	fmt.Println(destOptimalDoor)
+
+	sourcePlatformLength := geo.DistanceHaversine(sourceSpine[0], sourceSpine[1])
+	fromPlatformStart := geo.DistanceHaversine(sourceSpine[0], sourceOptimalDoor)
+	destPlatformLength := geo.DistanceHaversine(destSpine[0], destSpine[1])
+	toPlatformStart := geo.DistanceHaversine(destSpine[0], destOptimalDoor)
+
+	fmt.Println("platform points:")
+	fmt.Println(sourceSpine[0])
+	fmt.Println(sourceSpine[1])
+
+	alongSourcePlatform := fromPlatformStart / sourcePlatformLength
+	alongDestPlatform := toPlatformStart / destPlatformLength
+
+	fmt.Println("along source platform: " + fmt.Sprint(alongSourcePlatform*100) + "%")
+	fmt.Println("along dest platform: " + fmt.Sprint(alongDestPlatform*100) + "%")
+
+	fmt.Println("starting exit: " + fmt.Sprint(sourceExit.ID))
+	fmt.Println("ending exit: " + fmt.Sprint(destExit.ID))
 
 	geo := GeoJSON{
 		Type: "Feature",
