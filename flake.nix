@@ -20,6 +20,13 @@
 						zlib
 						gnumake
 
+						# protobuf
+						protoc-gen-go
+						protobuf
+
+						# perf
+						graphviz
+
 						# GUI dependencies
 						fyne
 						libGL 
