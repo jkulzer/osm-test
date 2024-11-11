@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/golang/geo/s2"
-	"log"
 	"os"
 	"runtime/pprof"
 	"strconv"
@@ -13,6 +13,11 @@ import (
 	"time"
 
 	"github.com/jkulzer/osm-test/linebound"
+	"github.com/jkulzer/osm-test/models"
+
+	// logging
+	// "github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	// "github.com/go-chi/chi/v5"
 	// "github.com/go-chi/chi/v5/middleware"
@@ -65,9 +70,15 @@ func isPartOfRoute(tags osm.Tags) bool {
 	return tags.Find("public_transport") == "stop_position" && tags.Find("route") != ""
 }
 
+func initAppContext() models.AppContext {
+	return models.AppContext{}
+}
+
 func main() {
 	fmt.Println("Data from:")
 	fmt.Println("© OpenStreetMap contributors: https://openstreetmap.org/copyright")
+
+	ctx := initAppContext()
 
 	cpuProfile, _ := os.Create("cpuprofile")
 	pprof.StartCPUProfile(cpuProfile)
@@ -81,22 +92,23 @@ func main() {
 	// Open the OSM PBF file
 	file, err := os.Open("berlin-latest.osm.pbf")
 	if err != nil {
-		log.Fatal("Error opening the file:", err)
+		log.Error()
 	}
 	defer file.Close()
 
 	// Get platforms and print related train services
-	getPlatforms(file)
+	getPlatforms(file, ctx)
 
 	pprof.StopCPUProfile()
 }
 
-func getPlatforms(file *os.File) {
+func getPlatforms(file *os.File, ctx models.AppContext) {
+
 	start := time.Now()
 
 	// maxDistance := 0.000000001
 	// maxDistance := 0.0
-	searchTerm := "Prinzenstraße"
+	searchTerm := "Warschauer Straße"
 
 	// Maps for storing OSM data
 	nodes := make(map[osm.NodeID]*osm.Node)
@@ -130,9 +142,7 @@ func getPlatforms(file *os.File) {
 			nodes[v.ID] = v
 			g.AddNode(simple.Node(v.ID))
 		case *osm.Way:
-			if v.Tags.Find("public_transport") == "platform" || v.Tags.Find("railway") != "" {
-				ways[v.ID] = v
-			}
+			ways[v.ID] = v
 			// iterates through every node on every way
 			nodeListLength := len(v.Nodes)
 			for i, node := range v.Nodes {
@@ -181,7 +191,7 @@ func getPlatforms(file *os.File) {
 	}
 	// Handle any errors that occurred during scanning
 	if err := scanner.Err(); err != nil {
-		log.Fatalf("Error reading OSM PBF file: %v", err)
+		log.Err(err).Msg("Error reading OSM PBF file: %v")
 	}
 	elapsed := time.Since(parseStart)
 	log.Printf("Parsing took %s", elapsed)
@@ -258,12 +268,12 @@ func getPlatforms(file *os.File) {
 	// destPlatform := int64(11762778)
 
 	// Warschauer Strasse Test
-	// sourcePlatform := int64(11765307)
-	// destPlatform := int64(379339107)
+	sourcePlatform := ways[52580085].ElementID()
+	destPlatform := relations[11765290].ElementID()
 
 	// Prinzenstraße Test
-	sourcePlatform := ways[49038087].ElementID()
-	destPlatform := ways[49038086].ElementID()
+	// sourcePlatform := ways[49038087].ElementID()
+	// destPlatform := ways[49038086].ElementID()
 
 	// Alexanderplatz Test
 	// sourcePlatform := int64(3637944)
@@ -342,15 +352,15 @@ func getPlatforms(file *os.File) {
 
 				red, err := strconv.ParseInt(service.Tags.Find("colour")[1:3], 16, 16)
 				if err != nil {
-					fmt.Println("failed decoding line color")
+					log.Warn().Msg("failed decoding line color")
 				}
 				green, err := strconv.ParseInt(service.Tags.Find("colour")[3:5], 16, 16)
 				if err != nil {
-					fmt.Println("failed decoding line color")
+					log.Warn().Msg("failed decoding line color")
 				}
 				blue, err := strconv.ParseInt(service.Tags.Find("colour")[5:7], 16, 16)
 				if err != nil {
-					fmt.Println("failed decoding line color")
+					log.Warn().Msg("failed decoding line color")
 				}
 				color.RGB(255, 255, 255).AddBgRGB(int(red), int(green), int(blue)).Println(printData)
 			} else {
@@ -368,10 +378,10 @@ func getPlatforms(file *os.File) {
 		for _, wayNode := range platform.Nodes {
 			platformNodes = append(platformNodes, *nodes[wayNode.ID])
 		}
-		linebound.GetPlatformSpine(platformNodes, platformSpines, trainTracks, nodes, platform.ElementID())
 
 		currentSpine := platformSpines[platform.ElementID()]
 		if platform.Tags.Find("area") == "yes" {
+			linebound.SetPlatformSpine(ctx, platformNodes, platformSpines, trainTracks, nodes, platform.ElementID())
 		} else {
 			startNode := linebound.NodeToPoint(*nodes[platform.Nodes[0].ID])
 			endNode := linebound.NodeToPoint(*nodes[platform.Nodes[len(platform.Nodes)-1].ID])
@@ -390,32 +400,53 @@ func getPlatforms(file *os.File) {
 		}
 	}
 	for platform := range relevantPlatformRelations.Iterator().C {
+		var platformNodes []osm.Node
+		var platformEdges []*osm.Way
 		for _, member := range platform.Members {
-			if member.Type == "way" {
-				// get a slice off all the member nodes of a way and range over that
+			log.Debug().Msg("member has type " + fmt.Sprint(member.Type))
+			if member.Type == osm.TypeWay {
 				wayID := member.ElementID().WayID()
 				way := ways[wayID]
+				if way.Tags.Find("railway") == "platform_edge" {
+					log.Debug().Msg("way " + fmt.Sprint(wayID) + " in relation " + fmt.Sprint(platform.ID) + " is platform_edge")
+					platformEdges = append(platformEdges, way)
+				}
 				for _, wayNode := range way.Nodes {
 					// since way nodes don't have tags i need to find the original node in the map
 					node := nodes[wayNode.ID]
-					if (nodes[node.ID].Tags.Find("level") != "") || footWays.Contains(node.ID) {
-						if platform.ElementID() == sourcePlatform {
-							sourceNodes = append(sourceNodes, node.ID)
-						}
-						if platform.ElementID() == destPlatform {
-							targetNodes = append(targetNodes, node.ID)
-						}
-					}
+					platformNodes = append(platformNodes, *node)
+				}
+			}
+		}
+
+		if platformEdges == nil {
+			linebound.SetPlatformSpine(ctx, platformNodes, platformSpines, trainTracks, nodes, platform.ElementID())
+		} else {
+			log.Debug().Msg(fmt.Sprint(platformEdges))
+			platformEdgeToUse := platformEdges[0]
+			var edgeSpine [2]orb.Point
+			edgeSpine[0] = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[0].ID])
+			edgeSpine[1] = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[len(platformEdgeToUse.Nodes)-1].ID])
+			log.Debug().Msg("edge spine: " + fmt.Sprint(edgeSpine))
+			platformSpines[platform.ElementID()] = edgeSpine
+		}
+		for _, node := range platformNodes {
+			if (nodes[node.ID].Tags.Find("level") != "") || footWays.Contains(node.ID) {
+				if platform.ElementID() == sourcePlatform {
+					sourceNodes = append(sourceNodes, node.ID)
+				}
+				if platform.ElementID() == destPlatform {
+					targetNodes = append(targetNodes, node.ID)
 				}
 			}
 		}
 	}
 	elapsed = time.Since(closenessStart)
-	log.Printf("Closeness checking took %s", elapsed)
+	log.Debug().Msg("Closeness checking took " + fmt.Sprint(elapsed) + "s")
 	routingTime := time.Now()
 
-	fmt.Println("source nodes: " + fmt.Sprint(sourceNodes))
-	fmt.Println("target nodes: " + fmt.Sprint(targetNodes))
+	log.Info().Msg("source nodes: " + fmt.Sprint(sourceNodes))
+	log.Info().Msg("target nodes: " + fmt.Sprint(targetNodes))
 
 	var shortestPath []graph.Node
 	var shortestWeight float64
@@ -454,6 +485,15 @@ func getPlatforms(file *os.File) {
 	sourceSpine := platformSpines[sourcePlatform]
 	destSpine := platformSpines[destPlatform]
 
+	if sourceSpine == [2]orb.Point{} {
+		log.Debug().Msg(fmt.Sprint(platformSpines))
+		log.Err(errors.New("nil value in platform spine")).Msg("nil value in source platform spine")
+	}
+	if destSpine == [2]orb.Point{} {
+		log.Debug().Msg(fmt.Sprint(platformSpines))
+		log.Err(errors.New("nil value in platform spine")).Msg("nil value in dest platform spine")
+	}
+
 	sourcePoint0 := linebound.OrbPointToGeoPoint(sourceSpine[0])
 	sourcePoint1 := linebound.OrbPointToGeoPoint(sourceSpine[1])
 
@@ -464,13 +504,14 @@ func getPlatforms(file *os.File) {
 	destExitPoint := linebound.OrbPointToGeoPoint(linebound.NodeToPoint(destExit))
 
 	sourcePlatformEdgePoint := s2.Project(sourceExitPoint, sourcePoint0, sourcePoint1)
+	log.Debug().Msg(fmt.Sprint(linebound.GeoPointToOrbPoint(destPoint0)))
 	destPlatformEdgePoint := s2.Project(destExitPoint, destPoint0, destPoint1)
 
 	sourceOptimalDoor := linebound.GeoPointToOrbPoint(sourcePlatformEdgePoint)
 	destOptimalDoor := linebound.GeoPointToOrbPoint(destPlatformEdgePoint)
-	fmt.Println("optimal spots:")
-	fmt.Println(sourceOptimalDoor)
-	fmt.Println(destOptimalDoor)
+	log.Info().Msg("optimal spots:")
+	log.Info().Msg(fmt.Sprint(sourceOptimalDoor))
+	log.Info().Msg(fmt.Sprint(destOptimalDoor))
 
 	sourcePlatformLength := geo.DistanceHaversine(sourceSpine[0], sourceSpine[1])
 	fromPlatformStart := geo.DistanceHaversine(sourceSpine[0], sourceOptimalDoor)
@@ -480,11 +521,11 @@ func getPlatforms(file *os.File) {
 	alongSourcePlatform := fromPlatformStart / sourcePlatformLength
 	alongDestPlatform := toPlatformStart / destPlatformLength
 
-	fmt.Println("along source platform: " + fmt.Sprint(alongSourcePlatform*100) + "%")
-	fmt.Println("along dest platform: " + fmt.Sprint(alongDestPlatform*100) + "%")
+	log.Info().Msg("along source platform: " + fmt.Sprint(alongSourcePlatform*100) + "%")
+	log.Info().Msg("along dest platform: " + fmt.Sprint(alongDestPlatform*100) + "%")
 
-	fmt.Println("starting exit: " + fmt.Sprint(sourceExit.ID))
-	fmt.Println("ending exit: " + fmt.Sprint(destExit.ID))
+	log.Info().Msg("starting exit: " + fmt.Sprint(sourceExit.ID))
+	log.Info().Msg("ending exit: " + fmt.Sprint(destExit.ID))
 
 	geo := GeoJSON{
 		Type: "Feature",
@@ -502,7 +543,7 @@ func getPlatforms(file *os.File) {
 
 	file, err := os.Create("path.geojson")
 	if err != nil {
-		fmt.Println("Error creating file:", err)
+		log.Err(err).Msg("Error creating file:")
 		return
 	}
 	defer file.Close()
@@ -510,7 +551,7 @@ func getPlatforms(file *os.File) {
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(geo); err != nil {
-		fmt.Println("Error encoding GeoJSON:", err)
+		log.Err(err).Msg("Error encoding GeoJSON:")
 		return
 	}
 	elapsed = time.Since(outputTime)

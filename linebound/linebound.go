@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/golang/geo/s2"
+	"github.com/jkulzer/osm-test/models"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geo"
 	"github.com/paulmach/osm"
@@ -98,86 +99,100 @@ func radiansToDegrees(rad float64) float64 {
 	return rad * 180.0 / math.Pi
 }
 
-func GetPlatformSpine(sourceNodes []osm.Node, platformSpines map[osm.ElementID][2]orb.Point, trainTracks []orb.Ring, nodes map[osm.NodeID]*osm.Node, elementID osm.ElementID) {
+func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpines map[osm.ElementID][2]orb.Point, trainTracks []orb.Ring, nodes map[osm.NodeID]*osm.Node, elementID osm.ElementID) {
 	platformNodeLength := len(sourceNodes)
 	nodeCloseness := make([]bool, platformNodeLength)
-
-	for index, node := range sourceNodes {
-		for _, bound := range trainTracks {
-			_, err := IsPointInRectangle(bound, NodeToPoint(*nodes[node.ID]))
-			isCloseToRails, err := IsPointInRectangle(bound, NodeToPoint(*nodes[node.ID]))
-			if err != nil {
-				fmt.Println("Failed to check if platform " + fmt.Sprint(elementID) + " is inside of bound")
-			}
-			if isCloseToRails {
-				nodeCloseness[index] = isCloseToRails
-			} else {
-				if nodeCloseness[index] == true {
-				} else {
-					nodeCloseness[index] = false
-				}
-			}
-		}
-	}
-	startingPoint := 0
-	for index, value := range nodeCloseness {
-		if value == false {
-			startingPoint = index
-			break
-		} else {
-			// all nodes inside of bounds
-		}
-	}
-	toMove := nodeCloseness[0:startingPoint]
-	slices.Delete(nodeCloseness, 0, startingPoint)
-	nodeCloseness = append(nodeCloseness, toMove...)
-
-	platformNodes := make([]osm.WayNode, len(sourceNodes))
-	copy(platformNodes, platformNodes)
-
-	platformNodesToMove := platformNodes[0:startingPoint]
-	slices.Delete(platformNodes, 0, startingPoint)
-	platformNodes = append(platformNodes, platformNodesToMove...)
-
-	longestStart := -1
-	longestEnd := -1
-	localStart := -1
-	localEnd := -1
-	for index, value := range nodeCloseness {
-		if value {
-			if localStart < 0 {
-				localStart = index
-				localEnd = index
-			} else if nodeCloseness[index-1] == false {
-				localStart = index
-				localEnd = index
-			} else {
-				localEnd++
-			}
-		} else {
-			if localStart >= 0 {
-				if nodeCloseness[index-1] {
-					if localEnd-localStart > longestEnd-longestStart {
-						longestStart = localStart
-						longestEnd = localEnd
+	if platformNodeLength != 0 {
+		if sourceNodes[0].ID == sourceNodes[platformNodeLength-1].ID {
+			for index, node := range sourceNodes {
+				for _, bound := range trainTracks {
+					_, err := IsPointInRectangle(bound, NodeToPoint(*nodes[node.ID]))
+					isCloseToRails, err := IsPointInRectangle(bound, NodeToPoint(*nodes[node.ID]))
+					if err != nil {
+						ctx.Log.Warn().Msg("Failed to check if platform " + fmt.Sprint(elementID) + " is inside of bound")
+					}
+					if isCloseToRails {
+						nodeCloseness[index] = isCloseToRails
+					} else {
+						if nodeCloseness[index] == true {
+						} else {
+							nodeCloseness[index] = false
+						}
 					}
 				}
 			}
+			startingPoint := 0
+			for index, value := range nodeCloseness {
+				if value == false {
+					startingPoint = index
+					break
+				} else {
+					ctx.Log.Debug().Msg("all nodes inside of bounds")
+				}
+			}
+			toMove := nodeCloseness[0:startingPoint]
+			slices.Delete(nodeCloseness, 0, startingPoint)
+			nodeCloseness = append(nodeCloseness, toMove...)
+
+			platformNodes := make([]osm.Node, platformNodeLength)
+			copy(platformNodes, sourceNodes)
+
+			platformNodesToMove := platformNodes[0:startingPoint]
+			slices.Delete(platformNodes, 0, startingPoint)
+			platformNodes = append(platformNodes, platformNodesToMove...)
+
+			longestStart := -1
+			longestEnd := -1
+			localStart := -1
+			localEnd := -1
+			for index, value := range nodeCloseness {
+				if value {
+					if localStart < 0 {
+						localStart = index
+						localEnd = index
+					} else if nodeCloseness[index-1] == false {
+						localStart = index
+						localEnd = index
+					} else {
+						localEnd++
+					}
+				} else {
+					if localStart >= 0 {
+						if nodeCloseness[index-1] {
+							if localEnd-localStart > longestEnd-longestStart {
+								longestStart = localStart
+								longestEnd = localEnd
+							}
+						}
+					}
+				}
+			}
+
+			ctx.Log.Debug().Msg(fmt.Sprint(elementID))
+			if longestStart >= 0 && longestEnd > 0 {
+				relevantNodes := platformNodes[longestStart : longestEnd+1]
+
+				var spinePoints [2]orb.Point
+				firstNode := nodes[relevantNodes[0].ID]
+				lastNode := nodes[relevantNodes[len(relevantNodes)-1].ID]
+				firstPoint := NodeToPoint(*firstNode)
+				lastPoint := NodeToPoint(*lastNode)
+				spinePoints[0] = firstPoint
+				spinePoints[1] = lastPoint
+				platformSpines[elementID] = spinePoints
+			} else {
+				ctx.Log.Warn().Msg("found no suitable spine for platform with ID " + fmt.Sprint(elementID))
+				ctx.Log.Warn().Msg(" Closeness result: " + fmt.Sprint(nodeCloseness))
+			}
+		} else {
+			startNode := NodeToPoint(*nodes[sourceNodes[0].ID])
+			endNode := NodeToPoint(*nodes[sourceNodes[platformNodeLength-1].ID])
+			var currentSpine [2]orb.Point
+			currentSpine[0] = startNode
+			currentSpine[1] = endNode
+			platformSpines[elementID] = currentSpine
 		}
-	}
-
-	var spinePoints [2]orb.Point
-	firstNode := sourceNodes[0]
-	lastNode := sourceNodes[platformNodeLength-1]
-	if firstNode.ID == lastNode.ID {
-		firstPoint := NodeToPoint(firstNode)
-		lastPoint := NodeToPoint(lastNode)
-		spinePoints[0] = firstPoint
-		spinePoints[1] = lastPoint
 	} else {
-		spinePoints[0] = NodeToPoint(firstNode)
-		spinePoints[1] = NodeToPoint(lastNode)
+		ctx.Log.Warn().Msg("length of source nodes " + fmt.Sprint(elementID) + " is " + fmt.Sprint(platformNodeLength))
 	}
-
-	platformSpines[elementID] = spinePoints
 }
