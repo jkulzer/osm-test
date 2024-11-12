@@ -31,11 +31,12 @@ import (
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
-	// "fyne.io/fyne/v2/app"
-	// "fyne.io/fyne/v2/widget"
 )
 
 type GeoJSON struct {
@@ -83,51 +84,79 @@ func main() {
 	cpuProfile, _ := os.Create("cpuprofile")
 	pprof.StartCPUProfile(cpuProfile)
 
-	// a := app.New()
-	// w := a.NewWindow("Hello World")
-	//
-	// w.SetContent(widget.NewLabel("Hello World!"))
-	// w.ShowAndRun()
+	a := app.New()
+	w := a.NewWindow("Platform Routing App")
+	ctx.Window = w
 
-	// Open the OSM PBF file
+	searchTermEntry := widget.NewEntry()
+	searchTermEntry.SetPlaceHolder("Enter station name, e.g., 'Warschauer Straße'")
+
+	statusLabel := widget.NewLabel("Status: Ready")
 	file, err := os.Open("berlin-latest.osm.pbf")
 	if err != nil {
-		log.Error()
+		statusLabel.SetText("Failed to open OSM file")
+		log.Error().Err(err).Msg("Failed to open OSM file")
+		return
 	}
-	defer file.Close()
 
-	// Get platforms and print related train services
-	getPlatforms(file, ctx)
+	nodes, ways, relations, footWays, graph := processData(file, ctx)
+
+	loadButton := widget.NewButton("Load Data", func() {
+
+		// Call your data loading and parsing functions here
+		go func() {
+			resultCalculation(file, ctx, nodes, ways, relations, footWays, graph)
+			defer file.Close()
+			statusLabel.SetText("Data loaded successfully")
+		}()
+	})
+
+	searchButton := widget.NewButton("Search", func() {
+		searchTerm := searchTermEntry.Text
+		if searchTerm == "" {
+			statusLabel.SetText("Please enter a search term")
+			return
+		}
+
+		// Run the platform search function based on the search term
+		go func() {
+			statusLabel.SetText(fmt.Sprintf("Searching for '%s'...", searchTerm))
+			// Here, you would call your function to search platforms, e.g., getPlatforms(file, searchTerm)
+			// For simplicity, I just simulate it here
+			statusLabel.SetText(fmt.Sprintf("Found platforms for '%s'", searchTerm))
+		}()
+	})
+
+	// Layout the UI components
+	content := container.NewVBox(
+		widget.NewLabel("Platform Routing Application"),
+		searchTermEntry,
+		loadButton,
+		searchButton,
+		statusLabel,
+	)
+
+	w.SetContent(content)
+	w.ShowAndRun()
 
 	pprof.StopCPUProfile()
 }
 
-func getPlatforms(file *os.File, ctx models.AppContext) {
+func processData(file *os.File, ctx models.AppContext) (map[osm.NodeID]*osm.Node, map[osm.WayID]*osm.Way, map[osm.RelationID]*osm.Relation, mapset.Set[osm.NodeID], *simple.WeightedDirectedGraph) {
 
-	start := time.Now()
+	log.Info().Msg("started processing data")
+	// UI
+	infiniteLoadingBar := widget.NewProgressBarInfinite()
+	infiniteLoadingBar.Start()
+	loadingContainer := container.NewVBox(infiniteLoadingBar)
+	ctx.Window.SetContent(loadingContainer)
 
-	// maxDistance := 0.000000001
-	// maxDistance := 0.0
-	searchTerm := "Warschauer Straße"
-
-	// Maps for storing OSM data
 	nodes := make(map[osm.NodeID]*osm.Node)
 	ways := make(map[osm.WayID]*osm.Way)
 	relations := make(map[osm.RelationID]*osm.Relation)
-	platformWays := make(map[osm.WayID]*osm.Way)
-	platformRelations := make(map[osm.RelationID]*osm.Relation)
-	relevantPlatformWays := mapset.NewSet[*osm.Way]()
-	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
 	footWays := mapset.NewSet[osm.NodeID]()
 
-	platforms := make(map[PlatformKey]GenericPlatform)
-
-	routes := make(map[osm.RelationID]*osm.Relation)
-	var trainTracks []orb.Ring
-
 	g := simple.NewWeightedDirectedGraph(1, 0)
-
-	parseStart := time.Now()
 
 	// Create a PBF reader
 	scanner := osmpbf.New(context.Background(), file, 4)
@@ -193,10 +222,33 @@ func getPlatforms(file *os.File, ctx models.AppContext) {
 	if err := scanner.Err(); err != nil {
 		log.Err(err).Msg("Error reading OSM PBF file: %v")
 	}
+	log.Info().Msg("done processing data")
+
+	return nodes, ways, relations, footWays, g
+}
+
+func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, footWays mapset.Set[osm.NodeID], g *simple.WeightedDirectedGraph) {
+
+	platformWays := make(map[osm.WayID]*osm.Way)
+	platformRelations := make(map[osm.RelationID]*osm.Relation)
+	relevantPlatformWays := mapset.NewSet[*osm.Way]()
+	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
+	start := time.Now()
+
+	platforms := make(map[PlatformKey]GenericPlatform)
+
+	routes := make(map[osm.RelationID]*osm.Relation)
+	var trainTracks []orb.Ring
+
+	parseStart := time.Now()
+
+	searchTerm := "Warschauer Straße"
+
 	elapsed := time.Since(parseStart)
 	log.Printf("Parsing took %s", elapsed)
 	searchStart := time.Now()
 
+	ctx.Window.SetContent(widget.NewLabel("data processing done"))
 	// Filter ways for platforms and paths
 	for _, v := range ways {
 
@@ -259,28 +311,8 @@ func getPlatforms(file *os.File, ctx models.AppContext) {
 			}
 		}
 	}
-
 	elapsed = time.Since(searchStart)
 	log.Printf("Search took %s", elapsed)
-
-	// Brandenburger Tor Test
-	// sourcePlatform := int64(237221908)
-	// destPlatform := int64(11762778)
-
-	// Warschauer Strasse Test
-	sourcePlatform := ways[52580085].ElementID()
-	destPlatform := relations[11765290].ElementID()
-
-	// Prinzenstraße Test
-	// sourcePlatform := ways[49038087].ElementID()
-	// destPlatform := ways[49038086].ElementID()
-
-	// Alexanderplatz Test
-	// sourcePlatform := int64(3637944)
-	// destPlatform := int64(3637412)
-
-	var sourceNodes []osm.NodeID
-	var targetNodes []osm.NodeID
 
 	// ==================================
 	// Match stop positions with services
@@ -368,6 +400,27 @@ func getPlatforms(file *os.File, ctx models.AppContext) {
 			}
 		}
 	}
+
+	ctx.Window.SetContent(widget.NewLabel(fmt.Sprint(platformWays) + "\n" + fmt.Sprint(platformRelations)))
+
+	// Brandenburger Tor Test
+	// sourcePlatform := int64(237221908)
+	// destPlatform := int64(11762778)
+
+	// Warschauer Strasse Test
+	sourcePlatform := ways[52580085].ElementID()
+	destPlatform := relations[11765290].ElementID()
+
+	// Prinzenstraße Test
+	// sourcePlatform := ways[49038087].ElementID()
+	// destPlatform := ways[49038086].ElementID()
+
+	// Alexanderplatz Test
+	// sourcePlatform := int64(3637944)
+	// destPlatform := int64(3637412)
+
+	var sourceNodes []osm.NodeID
+	var targetNodes []osm.NodeID
 
 	platformSpines := make(map[osm.ElementID][2]orb.Point)
 
