@@ -8,12 +8,13 @@ import (
 	"github.com/golang/geo/s2"
 	"os"
 	"runtime/pprof"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jkulzer/osm-test/helpers"
 	"github.com/jkulzer/osm-test/linebound"
 	"github.com/jkulzer/osm-test/models"
+	"github.com/jkulzer/osm-test/ui"
 
 	// logging
 	// "github.com/rs/zerolog"
@@ -31,9 +32,11 @@ import (
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 
+	// "fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
+
 	"gonum.org/v1/gonum/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
@@ -235,7 +238,7 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
 	start := time.Now()
 
-	platforms := make(map[PlatformKey]GenericPlatform)
+	platforms := make(map[osm.ElementID]models.PlatformItem)
 
 	routes := make(map[osm.RelationID]*osm.Relation)
 	var trainTracks []orb.Ring
@@ -287,11 +290,8 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformWays[v.ID] = v
-
-			// adds to the generic platform list
-			platformKey := PlatformKey{Type: osm.TypeWay, ID: int64(v.ID)}
-			platforms[platformKey] = GenericPlatform{
-				Services: mapset.NewSet[*osm.Relation](),
+			platforms[v.ElementID()] = models.PlatformItem{
+				ElementID: v.ElementID(),
 			}
 		}
 	}
@@ -303,11 +303,8 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 		}
 		if (v.Tags.Find("railway") == "platform" || v.Tags.Find("public_transport") == "platform") && strings.Contains(v.Tags.Find("name"), searchTerm) {
 			platformRelations[v.ID] = v
-
-			// adds to the generic platform list
-			platformKey := PlatformKey{Type: osm.TypeRelation, ID: int64(v.ID)}
-			platforms[platformKey] = GenericPlatform{
-				Services: mapset.NewSet[*osm.Relation](),
+			platforms[v.ElementID()] = models.PlatformItem{
+				ElementID: v.ElementID(),
 			}
 		}
 	}
@@ -324,17 +321,6 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 
 		// iterates through every node that is in a given route
 		for _, routeMember := range route.Members {
-			// for stopID, stopPosition := range stopPositions {
-			// 	if routeMember.Type == osm.TypeNode && stopID == routeMember.Ref {
-			// 		fmt.Printf(
-			// 			"Stop: %s with service %s with ID %d\n",
-			// 			stopPosition.Tags.Find("name"),
-			// 			route.Tags.Find("name"),
-			// 			stopPosition.ID,
-			// 		)
-			// 	}
-			// }
-
 			// iterates through every platform
 			for platformID, platform := range platformWays {
 
@@ -342,8 +328,10 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 				if int64(platformID) == routeMember.Ref {
 					relevantPlatformWays.Add(platform)
 
-					platformKey := PlatformKey{Type: osm.TypeWay, ID: int64(platform.ID)}
-					platforms[platformKey].Services.Add(route)
+					elementID := platform.ElementID()
+					currentPlatform := platforms[elementID]
+					currentPlatform.Services = append(currentPlatform.Services, route)
+					platforms[elementID] = currentPlatform
 
 				}
 			}
@@ -353,8 +341,10 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 					if platformID == routeMember.ElementID().RelationID() {
 						relevantPlatformRelations.Add(platform)
 
-						platformKey := PlatformKey{Type: osm.TypeRelation, ID: int64(platform.ID)}
-						platforms[platformKey].Services.Add(route)
+						elementID := platform.ElementID()
+						currentPlatform := platforms[elementID]
+						currentPlatform.Services = append(currentPlatform.Services, route)
+						platforms[elementID] = currentPlatform
 					}
 				}
 			}
@@ -365,43 +355,46 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 
 	platformData := color.New(color.Bold, color.FgWhite).PrintlnFunc()
 
+	var userPlatformList models.PlatformList
+
 	for platformKey, genericPlatform := range platforms {
-		switch platformKey.Type {
+		switch platformKey.Type() {
 		case osm.TypeWay:
-			data := "Platform " + platformWays[osm.WayID(platformKey.ID)].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:"
+			data := "Platform " + platformWays[platformKey.WayID()].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.WayID()) + " and type " + fmt.Sprint(platformKey.Type()) + " has services:"
 			platformData(strings.Repeat("=", len(data)))
 			platformData(data)
 			platformData(strings.Repeat("=", len(data)))
 		case osm.TypeRelation:
-			data := "Platform " + platformRelations[osm.RelationID(platformKey.ID)].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.ID) + " and type " + fmt.Sprint(platformKey.Type) + " has services:"
+			data := "Platform " + platformRelations[platformKey.RelationID()].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.WayID()) + " and type " + fmt.Sprint(platformKey.Type()) + " has services:"
 			platformData(strings.Repeat("=", len(data)))
 			platformData(data)
 			platformData(strings.Repeat("=", len(data)))
 		}
-		for service := range genericPlatform.Services.Iterator().C {
-			printData := service.Tags.Find("name") + " with operator " + service.Tags.Find("operator") + " and vehicle type " + service.Tags.Find("route")
-			if len(service.Tags.Find("colour")) == 7 {
+		var serviceData []*osm.Relation
 
-				red, err := strconv.ParseInt(service.Tags.Find("colour")[1:3], 16, 16)
-				if err != nil {
-					log.Warn().Msg("failed decoding line color")
-				}
-				green, err := strconv.ParseInt(service.Tags.Find("colour")[3:5], 16, 16)
-				if err != nil {
-					log.Warn().Msg("failed decoding line color")
-				}
-				blue, err := strconv.ParseInt(service.Tags.Find("colour")[5:7], 16, 16)
-				if err != nil {
-					log.Warn().Msg("failed decoding line color")
-				}
-				color.RGB(255, 255, 255).AddBgRGB(int(red), int(green), int(blue)).Println(printData)
-			} else {
+		for _, service := range genericPlatform.Services {
+			printData := service.Tags.Find("name") + " with operator " + service.Tags.Find("operator") + " and vehicle type " + service.Tags.Find("route")
+
+			red, green, blue, err := helpers.ColorFromString(service.Tags.Find("colour"))
+			if err != nil {
+				log.Warn().Msg("failed decoding color")
 				fmt.Println(printData)
+			} else {
+				colorPrinter := color.RGB(255, 255, 255).AddBgRGB(int(red), int(green), int(blue))
+				colorPrinter.Println(printData)
 			}
+
+			serviceData = append(serviceData, service)
 		}
+		currentUserPlatform := models.PlatformItem{
+			ElementID: genericPlatform.ElementID,
+			Services:  serviceData,
+		}
+		userPlatformList = append(userPlatformList, currentUserPlatform)
 	}
 
-	ctx.Window.SetContent(widget.NewLabel(fmt.Sprint(platformWays) + "\n" + fmt.Sprint(platformRelations)))
+	platformUIList := ui.NewPlatformSelector(userPlatformList)
+	ctx.Window.SetContent(platformUIList)
 
 	// Brandenburger Tor Test
 	// sourcePlatform := int64(237221908)
