@@ -10,6 +10,8 @@ require (
 	gonum.org/v1/gonum v0.15.1
 )
 
+replace github.com/paulmach/osm => ../osm
+
 require (
 	fyne.io/fyne/v2 v2.5.2 // indirect
 	fyne.io/systray v1.11.0 // indirect

@@ -1,11 +1,17 @@
 package main
 
 import (
-	"context"
+	"github.com/golang/geo/s2"
+	"io"
+
 	"encoding/json"
 	"errors"
+
+	"context"
 	"fmt"
-	"github.com/golang/geo/s2"
+	"gonum.org/v1/gonum/graph"
+	"gonum.org/v1/gonum/graph/path"
+	"gonum.org/v1/gonum/graph/simple"
 	"os"
 	"runtime/pprof"
 	"strings"
@@ -17,11 +23,7 @@ import (
 	"github.com/jkulzer/osm-test/ui"
 
 	// logging
-	// "github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-
-	// "github.com/go-chi/chi/v5"
-	// "github.com/go-chi/chi/v5/middleware"
 
 	mapset "github.com/deckarep/golang-set/v2"
 
@@ -32,26 +34,13 @@ import (
 	"github.com/paulmach/osm"
 	"github.com/paulmach/osm/osmpbf"
 
-	// "fyne.io/fyne/v2"
+	fyne "fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	// "fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
-
-	"gonum.org/v1/gonum/graph"
-	"gonum.org/v1/gonum/graph/path"
-	"gonum.org/v1/gonum/graph/simple"
 )
-
-type GeoJSON struct {
-	Type       string      `json:"type"`
-	Geometry   Geometry    `json:"geometry"`
-	Properties interface{} `json:"properties"`
-}
-
-type Geometry struct {
-	Type        string      `json:"type"`
-	Coordinates [][]float64 `json:"coordinates"` // For LineString
-}
 
 type GenericPlatform struct {
 	Services mapset.Set[*osm.Relation]
@@ -87,72 +76,111 @@ func main() {
 	cpuProfile, _ := os.Create("cpuprofile")
 	pprof.StartCPUProfile(cpuProfile)
 
-	a := app.New()
+	a := app.NewWithID("1")
 	w := a.NewWindow("Platform Routing App")
 	ctx.Window = w
 
 	searchTermEntry := widget.NewEntry()
 	searchTermEntry.SetPlaceHolder("Enter station name, e.g., 'Warschauer Straße'")
 
-	statusLabel := widget.NewLabel("Status: Ready")
-	file, err := os.Open("berlin-latest.osm.pbf")
-	if err != nil {
-		statusLabel.SetText("Failed to open OSM file")
-		log.Error().Err(err).Msg("Failed to open OSM file")
-		return
-	}
+	// file, err := os.Open("berlin-latest.osm.pbf")
 
-	nodes, ways, relations, footWays, graph := processData(file, ctx)
+	progressBarOsmParsing := widget.NewProgressBar()
 
-	loadButton := widget.NewButton("Load Data", func() {
+	var nodes map[osm.NodeID]*osm.Node
+	var ways map[osm.WayID]*osm.Way
+	var relations map[osm.RelationID]*osm.Relation
+	footWays := mapset.NewSet[osm.NodeID]()
+	var graph *simple.WeightedDirectedGraph
 
-		// Call your data loading and parsing functions here
-		go func() {
-			resultCalculation(file, ctx, nodes, ways, relations, footWays, graph)
-			defer file.Close()
-			statusLabel.SetText("Data loaded successfully")
-		}()
-	})
+	doneProcessing := make(chan bool)
 
-	searchButton := widget.NewButton("Search", func() {
-		searchTerm := searchTermEntry.Text
-		if searchTerm == "" {
-			statusLabel.SetText("Please enter a search term")
-			return
-		}
-
-		// Run the platform search function based on the search term
-		go func() {
-			statusLabel.SetText(fmt.Sprintf("Searching for '%s'...", searchTerm))
-			// Here, you would call your function to search platforms, e.g., getPlatforms(file, searchTerm)
-			// For simplicity, I just simulate it here
-			statusLabel.SetText(fmt.Sprintf("Found platforms for '%s'", searchTerm))
-		}()
-	})
-
+	// UI setup
+	loadButton := container.NewVBox(progressBarOsmParsing)
 	// Layout the UI components
-	content := container.NewVBox(
+	mainMenu := container.NewVBox(
 		widget.NewLabel("Platform Routing Application"),
 		searchTermEntry,
 		loadButton,
-		searchButton,
-		statusLabel,
 	)
+	tabsList := []*container.TabItem{
+		// don't forget t o add it to the container.NewAppTabs function below!!
+		container.NewTabItem("Station search", mainMenu),
+		container.NewTabItem("Service select", container.NewVBox()),
+		container.NewTabItem("Result", container.NewVBox()),
+	}
+	tabsInstance := container.NewAppTabs(tabsList[0], tabsList[1], tabsList[2])
+	tabsInstance.SetTabLocation(container.TabLocationBottom)
 
-	w.SetContent(content)
+	ctx.Tabs = tabsInstance
+	ctx.Tabs.DisableIndex(1)
+	ctx.Tabs.DisableIndex(2)
+
+	w.SetContent(tabsInstance)
+
+	var reader fyne.URIReadCloser
+	readerChan := make(chan fyne.URIReadCloser)
+	errChan := make(chan error)
+
+	go func() {
+		// uri, err := storage.ParseURI("file://berlin-latest.osm.pbf")
+		// if err != nil {
+		// 	log.Error().Err(err).Msg("Failed to parse uri")
+		// 	dialog.ShowError(err, w)
+		// }
+
+		ui.ShowFilePicker(w, readerChan, errChan)
+
+		reader := <-readerChan
+		err := <-errChan
+		// reader, err = storage.Reader(uri)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to open OSM file")
+			dialog.ShowError(err, w)
+		}
+		nodes, ways, relations, footWays, graph = processData(reader, ctx)
+		doneProcessing <- true
+	}()
+
+	go func() {
+		// _ = <-readerChan
+		for i := 0.0; i <= 0.95; i += 0.01 {
+			time.Sleep(time.Millisecond * 60)
+			progressBarOsmParsing.SetValue(i)
+		}
+
+		// after data parsing is done
+		_ = <-doneProcessing
+		progressBarOsmParsing.SetValue(0.99)
+		button := container.NewVBox(widget.NewButton("Load Data", func() {
+			log.Info().Msg("started processing input data")
+			ctx.Tabs.EnableIndex(1)
+			ctx.Tabs.SelectIndex(1)
+			// Call data parsing function
+			go func() {
+				servicesAndPlatforms(reader, ctx, nodes, ways, relations, footWays, graph, searchTermEntry.Text)
+			}()
+		}))
+		viewport1 := container.NewVBox(
+			widget.NewLabel("Platform Routing Application"),
+			searchTermEntry,
+			button,
+		)
+		ctx.Tabs.Items[0].Content = viewport1
+	}()
 	w.ShowAndRun()
 
 	pprof.StopCPUProfile()
 }
 
-func processData(file *os.File, ctx models.AppContext) (map[osm.NodeID]*osm.Node, map[osm.WayID]*osm.Way, map[osm.RelationID]*osm.Relation, mapset.Set[osm.NodeID], *simple.WeightedDirectedGraph) {
+func processData(file io.Reader, ctx models.AppContext) (map[osm.NodeID]*osm.Node, map[osm.WayID]*osm.Way, map[osm.RelationID]*osm.Relation, mapset.Set[osm.NodeID], *simple.WeightedDirectedGraph) {
 
 	log.Info().Msg("started processing data")
 	// UI
 	infiniteLoadingBar := widget.NewProgressBarInfinite()
 	infiniteLoadingBar.Start()
 	loadingContainer := container.NewVBox(infiniteLoadingBar)
-	ctx.Window.SetContent(loadingContainer)
+	ctx.Tabs.Items[1].Content = loadingContainer
 
 	nodes := make(map[osm.NodeID]*osm.Node)
 	ways := make(map[osm.WayID]*osm.Way)
@@ -224,19 +252,23 @@ func processData(file *os.File, ctx models.AppContext) (map[osm.NodeID]*osm.Node
 	// Handle any errors that occurred during scanning
 	if err := scanner.Err(); err != nil {
 		log.Err(err).Msg("Error reading OSM PBF file: %v")
+		dialog.ShowError(err, ctx.Window)
 	}
 	log.Info().Msg("done processing data")
 
 	return nodes, ways, relations, footWays, g
 }
 
-func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, footWays mapset.Set[osm.NodeID], g *simple.WeightedDirectedGraph) {
+func servicesAndPlatforms(file io.Reader, ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, footWays mapset.Set[osm.NodeID], g *simple.WeightedDirectedGraph, searchTerm string) {
+	infiniteProgress := widget.NewProgressBarInfinite()
+	infiniteProgress.Start()
+	ctx.Tabs.Items[1].Content = container.NewCenter(infiniteProgress)
+	ctx.Tabs.DisableIndex(2)
 
 	platformWays := make(map[osm.WayID]*osm.Way)
 	platformRelations := make(map[osm.RelationID]*osm.Relation)
 	relevantPlatformWays := mapset.NewSet[*osm.Way]()
 	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
-	start := time.Now()
 
 	platforms := make(map[osm.ElementID]models.PlatformItem)
 
@@ -245,13 +277,10 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 
 	parseStart := time.Now()
 
-	searchTerm := "Warschauer Straße"
-
 	elapsed := time.Since(parseStart)
 	log.Printf("Parsing took %s", elapsed)
 	searchStart := time.Now()
 
-	ctx.Window.SetContent(widget.NewLabel("data processing done"))
 	// Filter ways for platforms and paths
 	for _, v := range ways {
 
@@ -355,7 +384,10 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 
 	platformData := color.New(color.Bold, color.FgWhite).PrintlnFunc()
 
-	var userPlatformList models.PlatformList
+	userPlatformList := models.PlatformList{
+		Ways:      ways,
+		Relations: relations,
+	}
 
 	for platformKey, genericPlatform := range platforms {
 		switch platformKey.Type() {
@@ -390,27 +422,42 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 			ElementID: genericPlatform.ElementID,
 			Services:  serviceData,
 		}
-		userPlatformList = append(userPlatformList, currentUserPlatform)
+		currentList := userPlatformList
+		currentList.Platforms = append(currentList.Platforms, currentUserPlatform)
+		userPlatformList = currentList
 	}
 
 	platformUIList := ui.NewPlatformSelector(userPlatformList)
-	ctx.Window.SetContent(platformUIList)
+	platformUIList.SourcePlatformChan = make(chan osm.ElementID)
+	platformUIList.DestPlatformChan = make(chan osm.ElementID)
 
-	// Brandenburger Tor Test
-	// sourcePlatform := int64(237221908)
-	// destPlatform := int64(11762778)
+	ctx.Tabs.Items[1].Content = platformUIList
 
-	// Warschauer Strasse Test
-	sourcePlatform := ways[52580085].ElementID()
-	destPlatform := relations[11765290].ElementID()
+	sourcePlatformID := <-platformUIList.SourcePlatformChan
+	destPlatformID := <-platformUIList.DestPlatformChan
 
-	// Prinzenstraße Test
-	// sourcePlatform := ways[49038087].ElementID()
-	// destPlatform := ways[49038086].ElementID()
+	calcShortestPath(ctx, nodes, ways, relations, relevantPlatformWays, relevantPlatformRelations, trainTracks, footWays, g, sourcePlatformID, destPlatformID)
+}
 
-	// Alexanderplatz Test
-	// sourcePlatform := int64(3637944)
-	// destPlatform := int64(3637412)
+type GeoJSON struct {
+	Type       string      `json:"type"`
+	Geometry   Geometry    `json:"geometry"`
+	Properties interface{} `json:"properties"`
+}
+
+type Geometry struct {
+	Type        string      `json:"type"`
+	Coordinates [][]float64 `json:"coordinates"` // For LineString
+}
+
+func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, relevantPlatformWays mapset.Set[*osm.Way], relevantPlatformRelations mapset.Set[*osm.Relation], trainTracks []orb.Ring, footWays mapset.Set[osm.NodeID], g *simple.WeightedDirectedGraph, sourcePlatform osm.ElementID, destPlatform osm.ElementID) {
+
+	infiniteLoadingBar := widget.NewProgressBarInfinite()
+	infiniteLoadingBar.Start()
+	loadingContainer := container.NewCenter(infiniteLoadingBar)
+	ctx.Tabs.Items[2].Content = loadingContainer
+	ctx.Tabs.EnableIndex(2)
+	ctx.Tabs.SelectIndex(2)
 
 	var sourceNodes []osm.NodeID
 	var targetNodes []osm.NodeID
@@ -446,11 +493,16 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 		}
 	}
 	for platform := range relevantPlatformRelations.Iterator().C {
-		var platformNodes []osm.Node
+		// point nodes are all points on the platform. also includes inners, since that is an okay destination
+		var platformPointNodes []osm.Node
+		// spine search nodes should only be outers, since inners can confuse the algorithm since it should only be used the the outside of the platform
+		var platformSpineSearchNodes []osm.Node
+
 		var platformEdges []*osm.Way
 		for _, member := range platform.Members {
-			log.Debug().Msg("member has type " + fmt.Sprint(member.Type))
+			// log.Debug().Msg("member has type " + fmt.Sprint(member.Type))
 			if member.Type == osm.TypeWay {
+				// if member.Role != "inner" {
 				wayID := member.ElementID().WayID()
 				way := ways[wayID]
 				if way.Tags.Find("railway") == "platform_edge" {
@@ -460,13 +512,17 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 				for _, wayNode := range way.Nodes {
 					// since way nodes don't have tags i need to find the original node in the map
 					node := nodes[wayNode.ID]
-					platformNodes = append(platformNodes, *node)
+					platformPointNodes = append(platformPointNodes, *node)
+					if member.Role != "inner" {
+						platformSpineSearchNodes = append(platformSpineSearchNodes, *node)
+					}
 				}
+				// }
 			}
 		}
 
 		if platformEdges == nil {
-			linebound.SetPlatformSpine(ctx, platformNodes, platformSpines, trainTracks, nodes, platform.ElementID())
+			linebound.SetPlatformSpine(ctx, platformSpineSearchNodes, platformSpines, trainTracks, nodes, platform.ElementID())
 		} else {
 			log.Debug().Msg(fmt.Sprint(platformEdges))
 			platformEdgeToUse := platformEdges[0]
@@ -476,7 +532,7 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 			log.Debug().Msg("edge spine: " + fmt.Sprint(edgeSpine))
 			platformSpines[platform.ElementID()] = edgeSpine
 		}
-		for _, node := range platformNodes {
+		for _, node := range platformPointNodes {
 			if (nodes[node.ID].Tags.Find("level") != "") || footWays.Contains(node.ID) {
 				if platform.ElementID() == sourcePlatform {
 					sourceNodes = append(sourceNodes, node.ID)
@@ -487,7 +543,7 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 			}
 		}
 	}
-	elapsed = time.Since(closenessStart)
+	elapsed := time.Since(closenessStart)
 	log.Debug().Msg("Closeness checking took " + fmt.Sprint(elapsed) + "s")
 	routingTime := time.Now()
 
@@ -533,12 +589,18 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 
 	if sourceSpine == [2]orb.Point{} {
 		log.Debug().Msg(fmt.Sprint(platformSpines))
-		log.Err(errors.New("nil value in platform spine")).Msg("nil value in source platform spine")
+		error := errors.New("nil value in platform spine")
+		log.Err(error).Msg("nil value in source platform spine")
+		dialog.ShowError(error, ctx.Window)
 	}
 	if destSpine == [2]orb.Point{} {
 		log.Debug().Msg(fmt.Sprint(platformSpines))
-		log.Err(errors.New("nil value in platform spine")).Msg("nil value in dest platform spine")
+		error := errors.New("nil value in platform spine")
+		log.Err(error).Msg("nil value in dest platform spine")
+		dialog.ShowError(error, ctx.Window)
 	}
+	log.Debug().Msg("source spine: " + fmt.Sprint(sourceSpine))
+	log.Debug().Msg("dest spine: " + fmt.Sprint(destSpine))
 
 	sourcePoint0 := linebound.OrbPointToGeoPoint(sourceSpine[0])
 	sourcePoint1 := linebound.OrbPointToGeoPoint(sourceSpine[1])
@@ -580,6 +642,8 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 		},
 	}
 
+	ui.DisplayResults(ctx, alongSourcePlatform, alongDestPlatform)
+
 	for _, node := range shortestPath {
 		// Assuming the node ID corresponds to the OSM node ID
 		if coord, exists := nodes[osm.NodeID(node.ID())]; exists {
@@ -590,7 +654,7 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 	file, err := os.Create("path.geojson")
 	if err != nil {
 		log.Err(err).Msg("Error creating file:")
-		return
+		dialog.ShowError(err, ctx.Window)
 	}
 	defer file.Close()
 
@@ -598,11 +662,8 @@ func resultCalculation(file *os.File, ctx models.AppContext, nodes map[osm.NodeI
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(geo); err != nil {
 		log.Err(err).Msg("Error encoding GeoJSON:")
-		return
+		dialog.ShowError(err, ctx.Window)
 	}
 	elapsed = time.Since(outputTime)
 	log.Printf("Routing and output took %s", elapsed)
-
-	elapsed = time.Since(start)
-	log.Printf("Done in %s", elapsed)
 }
