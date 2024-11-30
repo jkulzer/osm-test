@@ -1,7 +1,5 @@
 run:
 	go fmt .
-	# templ fmt *
-	# templ generate
 	go run .
 
 perf-info:
@@ -9,4 +7,4 @@ perf-info:
 
 android-install:
 	fyne package -os android -appID com.example.myapp
-	adb install
+	adb install osm_test.apk

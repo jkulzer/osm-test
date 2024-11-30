@@ -6,6 +6,8 @@ import (
 	"github.com/fatih/color"
 	"github.com/rs/zerolog"
 
+	"github.com/paulmach/orb"
+
 	"github.com/paulmach/osm"
 )
 
@@ -18,6 +20,11 @@ type AppContext struct {
 type PlatformItem struct {
 	ElementID osm.ElementID
 	Services  []*osm.Relation
+}
+
+type PlatformAndServiceSelection struct {
+	Platform osm.ElementID
+	Service  osm.RelationID
 }
 
 type PlatformList struct {
@@ -34,4 +41,9 @@ type Service struct {
 	Origin      string
 	Destination string
 	Color       color.Color
+}
+
+type PlatformSpine struct {
+	Start orb.Point
+	End   orb.Point
 }

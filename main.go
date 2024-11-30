@@ -93,15 +93,27 @@ func main() {
 	footWays := mapset.NewSet[osm.NodeID]()
 	var graph *simple.WeightedDirectedGraph
 
+	startingProcessing := make(chan bool)
 	doneProcessing := make(chan bool)
 
 	// UI setup
 	loadButton := container.NewVBox(progressBarOsmParsing)
+
+	readerChan := make(chan fyne.URIReadCloser)
+	searchProcessingReader := make(chan fyne.URIReadCloser)
+	errChan := make(chan error)
+
+	loadFileButton := container.NewVBox(widget.NewButton("Load Data", func() {
+		go func() {
+			ui.ShowFilePicker(w, readerChan, errChan)
+		}()
+	}))
 	// Layout the UI components
 	mainMenu := container.NewVBox(
 		widget.NewLabel("Platform Routing Application"),
 		searchTermEntry,
 		loadButton,
+		loadFileButton,
 	)
 	tabsList := []*container.TabItem{
 		// don't forget t o add it to the container.NewAppTabs function below!!
@@ -118,10 +130,6 @@ func main() {
 
 	w.SetContent(tabsInstance)
 
-	var reader fyne.URIReadCloser
-	readerChan := make(chan fyne.URIReadCloser)
-	errChan := make(chan error)
-
 	go func() {
 		// uri, err := storage.ParseURI("file://berlin-latest.osm.pbf")
 		// if err != nil {
@@ -129,42 +137,48 @@ func main() {
 		// 	dialog.ShowError(err, w)
 		// }
 
-		ui.ShowFilePicker(w, readerChan, errChan)
-
 		reader := <-readerChan
+		log.Debug().Msg("received file reader for initial processing (1/2)")
 		err := <-errChan
-		// reader, err = storage.Reader(uri)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to open OSM file")
 			dialog.ShowError(err, w)
 		}
+		startingProcessing <- true
 		nodes, ways, relations, footWays, graph = processData(reader, ctx)
+		log.Debug().Msg("initial processing done")
 		doneProcessing <- true
+		searchProcessingReader <- reader
 	}()
 
 	go func() {
-		// _ = <-readerChan
+		_ = <-startingProcessing
 		for i := 0.0; i <= 0.95; i += 0.01 {
-			time.Sleep(time.Millisecond * 60)
+			time.Sleep(time.Millisecond * 100)
 			progressBarOsmParsing.SetValue(i)
 		}
 
 		// after data parsing is done
 		_ = <-doneProcessing
-		progressBarOsmParsing.SetValue(0.99)
-		button := container.NewVBox(widget.NewButton("Load Data", func() {
+		progressBarOsmParsing.SetValue(1)
+
+		button := container.NewVBox(widget.NewButton("Process Input File", func() {
 			log.Info().Msg("started processing input data")
 			ctx.Tabs.EnableIndex(1)
 			ctx.Tabs.SelectIndex(1)
 			// Call data parsing function
 			go func() {
+				reader := <-searchProcessingReader
+				log.Debug().Msg("received file reader for further processing (2/2)")
 				servicesAndPlatforms(reader, ctx, nodes, ways, relations, footWays, graph, searchTermEntry.Text)
 			}()
 		}))
+
 		viewport1 := container.NewVBox(
 			widget.NewLabel("Platform Routing Application"),
 			searchTermEntry,
 			button,
+			// loadFileButton,
 		)
 		ctx.Tabs.Items[0].Content = viewport1
 	}()
@@ -259,7 +273,16 @@ func processData(file io.Reader, ctx models.AppContext) (map[osm.NodeID]*osm.Nod
 	return nodes, ways, relations, footWays, g
 }
 
-func servicesAndPlatforms(file io.Reader, ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, footWays mapset.Set[osm.NodeID], g *simple.WeightedDirectedGraph, searchTerm string) {
+func servicesAndPlatforms(
+	file io.Reader,
+	ctx models.AppContext,
+	nodes map[osm.NodeID]*osm.Node,
+	ways map[osm.WayID]*osm.Way,
+	relations map[osm.RelationID]*osm.Relation,
+	footWays mapset.Set[osm.NodeID],
+	g *simple.WeightedDirectedGraph,
+	searchTerm string,
+) {
 	infiniteProgress := widget.NewProgressBarInfinite()
 	infiniteProgress.Start()
 	ctx.Tabs.Items[1].Content = container.NewCenter(infiniteProgress)
@@ -428,8 +451,8 @@ func servicesAndPlatforms(file io.Reader, ctx models.AppContext, nodes map[osm.N
 	}
 
 	platformUIList := ui.NewPlatformSelector(userPlatformList)
-	platformUIList.SourcePlatformChan = make(chan osm.ElementID)
-	platformUIList.DestPlatformChan = make(chan osm.ElementID)
+	platformUIList.SourcePlatformChan = make(chan models.PlatformAndServiceSelection)
+	platformUIList.DestPlatformChan = make(chan models.PlatformAndServiceSelection)
 
 	ctx.Tabs.Items[1].Content = platformUIList
 
@@ -450,7 +473,19 @@ type Geometry struct {
 	Coordinates [][]float64 `json:"coordinates"` // For LineString
 }
 
-func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, relevantPlatformWays mapset.Set[*osm.Way], relevantPlatformRelations mapset.Set[*osm.Relation], trainTracks []orb.Ring, footWays mapset.Set[osm.NodeID], g *simple.WeightedDirectedGraph, sourcePlatform osm.ElementID, destPlatform osm.ElementID) {
+func calcShortestPath(
+	ctx models.AppContext,
+	nodes map[osm.NodeID]*osm.Node,
+	ways map[osm.WayID]*osm.Way,
+	relations map[osm.RelationID]*osm.Relation,
+	relevantPlatformWays mapset.Set[*osm.Way],
+	relevantPlatformRelations mapset.Set[*osm.Relation],
+	trainTracks []orb.Ring,
+	footWays mapset.Set[osm.NodeID],
+	g *simple.WeightedDirectedGraph,
+	sourcePlatformAndService models.PlatformAndServiceSelection,
+	destPlatformAndService models.PlatformAndServiceSelection,
+) {
 
 	infiniteLoadingBar := widget.NewProgressBarInfinite()
 	infiniteLoadingBar.Start()
@@ -462,7 +497,9 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 	var sourceNodes []osm.NodeID
 	var targetNodes []osm.NodeID
 
-	platformSpines := make(map[osm.ElementID][2]orb.Point)
+	platformSpines := make(map[osm.ElementID]models.PlatformSpine)
+
+	var allClosePoints []osm.Node
 
 	closenessStart := time.Now()
 	for platform := range relevantPlatformWays.Iterator().C {
@@ -474,19 +511,20 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 
 		currentSpine := platformSpines[platform.ElementID()]
 		if platform.Tags.Find("area") == "yes" {
-			linebound.SetPlatformSpine(ctx, platformNodes, platformSpines, trainTracks, nodes, platform.ElementID())
+			linebound.SetPlatformSpine(ctx, platformNodes, platformSpines, trainTracks, nodes, platform.ElementID(), &allClosePoints)
 		} else {
 			startNode := linebound.NodeToPoint(*nodes[platform.Nodes[0].ID])
 			endNode := linebound.NodeToPoint(*nodes[platform.Nodes[len(platform.Nodes)-1].ID])
-			currentSpine[0] = startNode
-			currentSpine[1] = endNode
+			currentSpine.Start = startNode
+			currentSpine.End = endNode
+			log.Debug().Msg("Platform " + fmt.Sprint(platform.ElementID()) + " is not area and has spine " + fmt.Sprint(currentSpine))
 		}
 		for _, node := range platform.Nodes {
 			if (nodes[node.ID].Tags.Find("level") != "") || footWays.Contains(node.ID) {
-				if platform.ElementID() == sourcePlatform {
+				if platform.ElementID() == sourcePlatformAndService.Platform {
 					sourceNodes = append(sourceNodes, node.ID)
 				}
-				if platform.ElementID() == destPlatform {
+				if platform.ElementID() == destPlatformAndService.Platform {
 					targetNodes = append(targetNodes, node.ID)
 				}
 			}
@@ -522,27 +560,58 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 		}
 
 		if platformEdges == nil {
-			linebound.SetPlatformSpine(ctx, platformSpineSearchNodes, platformSpines, trainTracks, nodes, platform.ElementID())
+			linebound.SetPlatformSpine(ctx, platformSpineSearchNodes, platformSpines, trainTracks, nodes, platform.ElementID(), &allClosePoints)
 		} else {
 			log.Debug().Msg(fmt.Sprint(platformEdges))
+			ui.ShowPlatformEdgeSelector(ctx.Window, platformEdges)
 			platformEdgeToUse := platformEdges[0]
-			var edgeSpine [2]orb.Point
-			edgeSpine[0] = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[0].ID])
-			edgeSpine[1] = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[len(platformEdgeToUse.Nodes)-1].ID])
+			var edgeSpine models.PlatformSpine
+			edgeSpine.Start = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[0].ID])
+			edgeSpine.End = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[len(platformEdgeToUse.Nodes)-1].ID])
 			log.Debug().Msg("edge spine: " + fmt.Sprint(edgeSpine))
 			platformSpines[platform.ElementID()] = edgeSpine
 		}
 		for _, node := range platformPointNodes {
 			if (nodes[node.ID].Tags.Find("level") != "") || footWays.Contains(node.ID) {
-				if platform.ElementID() == sourcePlatform {
+				if platform.ElementID() == sourcePlatformAndService.Platform {
 					sourceNodes = append(sourceNodes, node.ID)
 				}
-				if platform.ElementID() == destPlatform {
+				if platform.ElementID() == destPlatformAndService.Platform {
 					targetNodes = append(targetNodes, node.ID)
 				}
 			}
 		}
 	}
+
+	geoJsonCloseNodes := GeoJSON{
+		Type: "Feature",
+		Geometry: Geometry{
+			Type: "LineString",
+		},
+	}
+
+	// debug output
+	for _, node := range allClosePoints {
+		// Assuming the node ID corresponds to the OSM node ID
+		if coord, exists := nodes[osm.NodeID(node.ID)]; exists {
+			geoJsonCloseNodes.Geometry.Coordinates = append(geoJsonCloseNodes.Geometry.Coordinates, []float64{coord.Lon, coord.Lat})
+		}
+	}
+
+	file, err := os.Create("close-nodes.geojson")
+	if err != nil {
+		log.Err(err).Msg("Error creating file:")
+		dialog.ShowError(err, ctx.Window)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(geoJsonCloseNodes); err != nil {
+		log.Err(err).Msg("Error encoding GeoJSON:")
+		dialog.ShowError(err, ctx.Window)
+	}
+
 	elapsed := time.Since(closenessStart)
 	log.Debug().Msg("Closeness checking took " + fmt.Sprint(elapsed) + "s")
 	routingTime := time.Now()
@@ -584,16 +653,16 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 	log.Printf("Routing took %s", elapsed)
 	outputTime := time.Now()
 
-	sourceSpine := platformSpines[sourcePlatform]
-	destSpine := platformSpines[destPlatform]
+	sourceSpine := platformSpines[sourcePlatformAndService.Platform]
+	destSpine := platformSpines[destPlatformAndService.Platform]
 
-	if sourceSpine == [2]orb.Point{} {
+	if sourceSpine == (models.PlatformSpine{}) {
 		log.Debug().Msg(fmt.Sprint(platformSpines))
 		error := errors.New("nil value in platform spine")
 		log.Err(error).Msg("nil value in source platform spine")
 		dialog.ShowError(error, ctx.Window)
 	}
-	if destSpine == [2]orb.Point{} {
+	if destSpine == (models.PlatformSpine{}) {
 		log.Debug().Msg(fmt.Sprint(platformSpines))
 		error := errors.New("nil value in platform spine")
 		log.Err(error).Msg("nil value in dest platform spine")
@@ -602,11 +671,19 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 	log.Debug().Msg("source spine: " + fmt.Sprint(sourceSpine))
 	log.Debug().Msg("dest spine: " + fmt.Sprint(destSpine))
 
-	sourcePoint0 := linebound.OrbPointToGeoPoint(sourceSpine[0])
-	sourcePoint1 := linebound.OrbPointToGeoPoint(sourceSpine[1])
+	log.Info().Msg("correcting source spine orientations")
+	sourceSpine = correctSpineOrientation(sourceSpine, sourcePlatformAndService, nodes, relations)
+	log.Info().Msg("correcting dest spine orientations")
+	destSpine = correctSpineOrientation(destSpine, destPlatformAndService, nodes, relations)
 
-	destPoint0 := linebound.OrbPointToGeoPoint(destSpine[0])
-	destPoint1 := linebound.OrbPointToGeoPoint(destSpine[1])
+	log.Debug().Msg("source spine modified: " + fmt.Sprint(sourceSpine))
+	log.Debug().Msg("dest spine modified: " + fmt.Sprint(destSpine))
+
+	sourcePoint0 := linebound.OrbPointToGeoPoint(sourceSpine.Start)
+	sourcePoint1 := linebound.OrbPointToGeoPoint(sourceSpine.End)
+
+	destPoint0 := linebound.OrbPointToGeoPoint(destSpine.Start)
+	destPoint1 := linebound.OrbPointToGeoPoint(destSpine.End)
 
 	sourceExitPoint := linebound.OrbPointToGeoPoint(linebound.NodeToPoint(sourceExit))
 	destExitPoint := linebound.OrbPointToGeoPoint(linebound.NodeToPoint(destExit))
@@ -621,16 +698,16 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 	log.Info().Msg(fmt.Sprint(sourceOptimalDoor))
 	log.Info().Msg(fmt.Sprint(destOptimalDoor))
 
-	sourcePlatformLength := geo.DistanceHaversine(sourceSpine[0], sourceSpine[1])
-	fromPlatformStart := geo.DistanceHaversine(sourceSpine[0], sourceOptimalDoor)
-	destPlatformLength := geo.DistanceHaversine(destSpine[0], destSpine[1])
-	toPlatformStart := geo.DistanceHaversine(destSpine[0], destOptimalDoor)
+	sourcePlatformLength := geo.DistanceHaversine(sourceSpine.Start, sourceSpine.End)
+	fromPlatformStart := geo.DistanceHaversine(sourceSpine.Start, sourceOptimalDoor)
+	destPlatformLength := geo.DistanceHaversine(destSpine.Start, destSpine.End)
+	toPlatformStart := geo.DistanceHaversine(destSpine.Start, destOptimalDoor)
 
 	alongSourcePlatform := fromPlatformStart / sourcePlatformLength
 	alongDestPlatform := toPlatformStart / destPlatformLength
 
-	log.Info().Msg("along source platform: " + fmt.Sprint(alongSourcePlatform*100) + "%")
-	log.Info().Msg("along dest platform: " + fmt.Sprint(alongDestPlatform*100) + "%")
+	log.Info().Msg("along source platform: " + fmt.Sprint(alongSourcePlatform*100) + "% or " + fmt.Sprint(fromPlatformStart) + "m")
+	log.Info().Msg("along dest platform: " + fmt.Sprint(alongDestPlatform*100) + "% or " + fmt.Sprint(toPlatformStart))
 
 	log.Info().Msg("starting exit: " + fmt.Sprint(sourceExit.ID))
 	log.Info().Msg("ending exit: " + fmt.Sprint(destExit.ID))
@@ -642,7 +719,7 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 		},
 	}
 
-	ui.DisplayResults(ctx, alongSourcePlatform, alongDestPlatform)
+	ui.DisplayResults(ctx, alongSourcePlatform, alongDestPlatform, fromPlatformStart, toPlatformStart)
 
 	for _, node := range shortestPath {
 		// Assuming the node ID corresponds to the OSM node ID
@@ -651,14 +728,14 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 		}
 	}
 
-	file, err := os.Create("path.geojson")
+	file, err = os.Create("path.geojson")
 	if err != nil {
 		log.Err(err).Msg("Error creating file:")
 		dialog.ShowError(err, ctx.Window)
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
+	encoder = json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(geo); err != nil {
 		log.Err(err).Msg("Error encoding GeoJSON:")
@@ -666,4 +743,59 @@ func calcShortestPath(ctx models.AppContext, nodes map[osm.NodeID]*osm.Node, way
 	}
 	elapsed = time.Since(outputTime)
 	log.Printf("Routing and output took %s", elapsed)
+}
+
+func correctSpineOrientation(inputSpine models.PlatformSpine, selection models.PlatformAndServiceSelection, nodes map[osm.NodeID]*osm.Node, relations map[osm.RelationID]*osm.Relation) models.PlatformSpine {
+	serviceObject := relations[selection.Service]
+
+	// fmt.Println(serviceObject)
+	fmt.Println(selection.Platform.FeatureID())
+
+	foundSelectedPlatform := false
+
+	var nextStop osm.Member
+
+	for _, member := range serviceObject.Members {
+		if member.ElementID().FeatureID() == selection.Platform.FeatureID() {
+			foundSelectedPlatform = true
+		}
+
+		if foundSelectedPlatform == true && member.Type == "node" {
+			nextStop = member
+			break
+		}
+	}
+
+	log.Debug().Msg("selected platform " + fmt.Sprint(selection.Platform.FeatureID()) + " has next stop " + fmt.Sprint(nextStop.FeatureID()))
+
+	var nextStopPoint orb.Point
+	if nextStop.ElementID().Type() == "node" {
+
+		node := nodes[nextStop.ElementID().NodeID()]
+		nextStopPoint = linebound.NodeToPoint(*node)
+	}
+
+	log.Debug().Msg("spine: " + fmt.Sprint(inputSpine))
+
+	log.Debug().Msg("stop point: " + fmt.Sprint(nextStopPoint))
+
+	spineStartNodeDistance := geo.Distance(inputSpine.Start, nextStopPoint)
+
+	spineEndNodeDistance := geo.Distance(inputSpine.End, nextStopPoint)
+
+	log.Debug().Msg("spine start node distance to next stop: " + fmt.Sprint(spineStartNodeDistance))
+	log.Debug().Msg("spine end node distance to next stop: " + fmt.Sprint(spineEndNodeDistance))
+
+	temp := inputSpine
+	if spineEndNodeDistance < spineStartNodeDistance {
+		inputSpine.Start = temp.End
+		inputSpine.End = temp.Start
+		log.Debug().Msg("switching around")
+	} else {
+		log.Debug().Msg("not switching around")
+	}
+
+	log.Debug().Msg("updated platform spine: " + fmt.Sprint(inputSpine))
+
+	return inputSpine
 }

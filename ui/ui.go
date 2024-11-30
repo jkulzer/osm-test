@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"errors"
 	"fmt"
 	"image/color"
 
@@ -25,8 +24,10 @@ type PlatformSelectorWidget struct {
 	items              models.PlatformList
 	sourcePlatform     osm.ElementID
 	destPlatform       osm.ElementID
-	SourcePlatformChan chan osm.ElementID
-	DestPlatformChan   chan osm.ElementID
+	sourceService      osm.Relation
+	destService        osm.Relation
+	SourcePlatformChan chan models.PlatformAndServiceSelection
+	DestPlatformChan   chan models.PlatformAndServiceSelection
 }
 
 func NewPlatformSelector(items models.PlatformList) *PlatformSelectorWidget {
@@ -162,19 +163,33 @@ func displayService(w *PlatformSelectorWidget, service *osm.Relation, platformID
 	sourceButton := widget.NewButton("Start here", func() {
 		log.Info().Msg("source platform: " + fmt.Sprint(platformID))
 		w.sourcePlatform = platformID
+		w.sourceService = *service
 		if int64(w.destPlatform) != 0 {
 			fmt.Println("done")
-			w.SourcePlatformChan <- w.sourcePlatform
-			w.DestPlatformChan <- w.destPlatform
+			w.SourcePlatformChan <- models.PlatformAndServiceSelection{
+				Platform: w.sourcePlatform,
+				Service:  w.sourceService.ID,
+			}
+			w.DestPlatformChan <- models.PlatformAndServiceSelection{
+				Platform: w.destPlatform,
+				Service:  w.destService.ID,
+			}
 		}
 	})
 	destButton := widget.NewButton("End here", func() {
 		log.Info().Msg("dest platform: " + fmt.Sprint(platformID))
 		w.destPlatform = platformID
+		w.destService = *service
 		if int64(w.sourcePlatform) != 0 {
 			fmt.Println("done")
-			w.SourcePlatformChan <- w.sourcePlatform
-			w.DestPlatformChan <- w.destPlatform
+			w.SourcePlatformChan <- models.PlatformAndServiceSelection{
+				Platform: w.sourcePlatform,
+				Service:  w.sourceService.ID,
+			}
+			w.DestPlatformChan <- models.PlatformAndServiceSelection{
+				Platform: w.destPlatform,
+				Service:  w.destService.ID,
+			}
 		}
 	})
 
@@ -189,10 +204,10 @@ func displayService(w *PlatformSelectorWidget, service *osm.Relation, platformID
 	content.Add(serviceContainer)
 }
 
-func DisplayResults(ctx models.AppContext, alongSourcePlatform float64, alongDestPlatform float64) {
+func DisplayResults(ctx models.AppContext, alongSourcePlatform float64, alongDestPlatform float64, fromPlatformStart float64, toPlatformStart float64) {
 
-	sourcePlatformText := canvas.NewText(fmt.Sprint(alongSourcePlatform*100)+"% along source platform", color.White)
-	destPlatformText := canvas.NewText(fmt.Sprint(alongDestPlatform*100)+"% along dest platform", color.White)
+	sourcePlatformText := canvas.NewText(fmt.Sprint(alongSourcePlatform*100)+"% along source platform or "+fmt.Sprint(fromPlatformStart)+"m", color.White)
+	destPlatformText := canvas.NewText(fmt.Sprint(alongDestPlatform*100)+"% along dest platform or "+fmt.Sprint(toPlatformStart)+"m", color.White)
 	serviceContainer := container.New(layout.NewVBoxLayout(), sourcePlatformText, destPlatformText)
 	content := container.NewVBox()
 	content.Add(serviceContainer)
@@ -200,10 +215,26 @@ func DisplayResults(ctx models.AppContext, alongSourcePlatform float64, alongDes
 }
 
 func ShowFilePicker(w fyne.Window, reader chan (fyne.URIReadCloser), returnError chan (error)) {
-	dialog.ShowError(errors.New("launching file picker"), w)
 	filePicker := dialog.NewFileOpen(func(f fyne.URIReadCloser, err error) {
-		reader <- f
-		returnError <- err
+		go func() {
+			reader <- f
+			returnError <- err
+		}()
 	}, w)
 	filePicker.Show()
+}
+
+func ShowPlatformEdgeSelector(w fyne.Window, platformEdges []*osm.Way) {
+	var customDialog *dialog.CustomDialog
+	content := container.NewVBox()
+	for edgeIndex, edge := range platformEdges {
+		edgePlatformNumber := edge.Tags.Find("ref")
+		edgeEntry := widget.NewButton(edgePlatformNumber, func() {
+			log.Info().Msg("selected platform edge " + edgePlatformNumber + " with slice index " + fmt.Sprint(edgeIndex))
+			customDialog.Hide()
+		})
+		content.Add(edgeEntry)
+	}
+	customDialog = dialog.NewCustomWithoutButtons("Select platform edge:", content, w)
+	customDialog.Show()
 }

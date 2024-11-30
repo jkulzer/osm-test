@@ -3,13 +3,18 @@ package linebound
 import (
 	"errors"
 	"fmt"
+	"math"
+	"slices"
+
 	"github.com/golang/geo/s2"
+
 	"github.com/jkulzer/osm-test/models"
+
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geo"
 	"github.com/paulmach/osm"
-	"math"
-	"slices"
+
+	"github.com/rs/zerolog/log"
 )
 
 func GetRotatedBoundWithPad(p1 orb.Point, p2 orb.Point, d float64) orb.LineString {
@@ -99,7 +104,8 @@ func radiansToDegrees(rad float64) float64 {
 	return rad * 180.0 / math.Pi
 }
 
-func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpines map[osm.ElementID][2]orb.Point, trainTracks []orb.Ring, nodes map[osm.NodeID]*osm.Node, elementID osm.ElementID) {
+func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpines map[osm.ElementID]models.PlatformSpine, trainTracks []orb.Ring, nodes map[osm.NodeID]*osm.Node, elementID osm.ElementID, allClosePoints *[]osm.Node) {
+	log.Debug().Msg("starting setting platform spine for " + fmt.Sprint(elementID))
 	platformNodeLength := len(sourceNodes)
 	nodeCloseness := make([]bool, platformNodeLength)
 	if platformNodeLength != 0 {
@@ -109,9 +115,10 @@ func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpi
 					_, err := IsPointInRectangle(bound, NodeToPoint(*nodes[node.ID]))
 					isCloseToRails, err := IsPointInRectangle(bound, NodeToPoint(*nodes[node.ID]))
 					if err != nil {
-						ctx.Log.Warn().Msg("Failed to check if platform " + fmt.Sprint(elementID) + " is inside of bound")
+						log.Warn().Msg("Failed to check if platform " + fmt.Sprint(elementID) + " is inside of bound")
 					}
 					if isCloseToRails {
+						log.Debug().Msg("close to rails")
 						nodeCloseness[index] = isCloseToRails
 					} else {
 						if nodeCloseness[index] == true {
@@ -121,13 +128,14 @@ func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpi
 					}
 				}
 			}
+			log.Debug().Msg(fmt.Sprint(nodeCloseness))
 			startingPoint := 0
 			for index, value := range nodeCloseness {
 				if value == false {
 					startingPoint = index
 					break
 				} else {
-					ctx.Log.Debug().Msg("all nodes inside of bounds")
+					log.Debug().Msg("all nodes inside of bounds")
 				}
 			}
 			toMove := nodeCloseness[0:startingPoint]
@@ -141,12 +149,18 @@ func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpi
 			slices.Delete(platformNodes, 0, startingPoint)
 			platformNodes = append(platformNodes, platformNodesToMove...)
 
+			log.Debug().Msg(fmt.Sprint(nodeCloseness))
+
 			longestStart := -1
 			longestEnd := -1
 			localStart := -1
 			localEnd := -1
 			for index, value := range nodeCloseness {
 				if value {
+					// for graphical debug output
+					log.Debug().Msg("node " + fmt.Sprint(platformNodes[index].ElementID()) + " is close")
+					// *allClosePoints = append(*allClosePoints, NodeToPoint(platformNodes[index]))
+					*allClosePoints = append(*allClosePoints, platformNodes[index])
 					if localStart < 0 {
 						localStart = index
 						localEnd = index
@@ -168,31 +182,32 @@ func SetPlatformSpine(ctx models.AppContext, sourceNodes []osm.Node, platformSpi
 				}
 			}
 
-			ctx.Log.Debug().Msg(fmt.Sprint(elementID))
+			// log.Debug().Msg("platform spine calculation for: " + fmt.Sprint(elementID) + " results in start node " + fmt.Sprint(platformNodes[longestStart]) + " and end node " + fmt.Sprint(platformNodes[longestEnd]))
+			log.Debug().Msg("platform spine calculation for: " + fmt.Sprint(elementID) + " results in start node " + fmt.Sprint(longestStart) + " and end node " + fmt.Sprint(longestEnd))
+
 			if longestStart >= 0 && longestEnd > 0 {
 				relevantNodes := platformNodes[longestStart : longestEnd+1]
 
-				var spinePoints [2]orb.Point
+				var spinePoints models.PlatformSpine
 				firstNode := nodes[relevantNodes[0].ID]
 				lastNode := nodes[relevantNodes[len(relevantNodes)-1].ID]
 				firstPoint := NodeToPoint(*firstNode)
 				lastPoint := NodeToPoint(*lastNode)
-				spinePoints[0] = firstPoint
-				spinePoints[1] = lastPoint
+				spinePoints.Start = firstPoint
+				spinePoints.End = lastPoint
 				platformSpines[elementID] = spinePoints
 			} else {
-				ctx.Log.Warn().Msg("found no suitable spine for platform with ID " + fmt.Sprint(elementID))
-				ctx.Log.Warn().Msg(" Closeness result: " + fmt.Sprint(nodeCloseness))
+				log.Warn().Msg("found no suitable spine for platform with ID " + fmt.Sprint(elementID))
 			}
 		} else {
 			startNode := NodeToPoint(*nodes[sourceNodes[0].ID])
 			endNode := NodeToPoint(*nodes[sourceNodes[platformNodeLength-1].ID])
-			var currentSpine [2]orb.Point
-			currentSpine[0] = startNode
-			currentSpine[1] = endNode
+			var currentSpine models.PlatformSpine
+			currentSpine.Start = startNode
+			currentSpine.End = endNode
 			platformSpines[elementID] = currentSpine
 		}
 	} else {
-		ctx.Log.Warn().Msg("length of source nodes " + fmt.Sprint(elementID) + " is " + fmt.Sprint(platformNodeLength))
+		log.Warn().Msg("length of source nodes " + fmt.Sprint(elementID) + " is " + fmt.Sprint(platformNodeLength))
 	}
 }
