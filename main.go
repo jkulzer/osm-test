@@ -29,10 +29,10 @@ import (
 
 	"github.com/fatih/color"
 
+	"github.com/jkulzer/osm"
+	"github.com/jkulzer/osm/osmpbf"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geo"
-	"github.com/paulmach/osm"
-	"github.com/paulmach/osm/osmpbf"
 
 	fyne "fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -390,7 +390,11 @@ func servicesAndPlatforms(
 			for platformID, platform := range platformRelations {
 				if routeMember.Type == "relation" {
 
-					if platformID == routeMember.ElementID().RelationID() {
+					relationID, err := routeMember.ElementID().RelationID()
+					if err != nil {
+						log.Err(err).Msg("determining RelationID of platform " + fmt.Sprint(platformID) + " failed since it is not of type relation")
+					}
+					if platformID == relationID {
 						relevantPlatformRelations.Add(platform)
 
 						elementID := platform.ElementID()
@@ -413,14 +417,26 @@ func servicesAndPlatforms(
 	}
 
 	for platformKey, genericPlatform := range platforms {
-		switch platformKey.Type() {
+		platformType, err := platformKey.Type()
+		if err != nil {
+			log.Err(err).Msg("determining type of platform " + fmt.Sprint(genericPlatform.ElementID) + " failed")
+		}
+		switch platformType {
 		case osm.TypeWay:
-			data := "Platform " + platformWays[platformKey.WayID()].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.WayID()) + " and type " + fmt.Sprint(platformKey.Type()) + " has services:"
+			wayID, err := platformKey.WayID()
+			if err != nil {
+				log.Err(err).Msg("determining WayID of platform " + fmt.Sprint(genericPlatform.ElementID) + " failed since it is not of type relation")
+			}
+			data := "Platform " + platformWays[wayID].Tags.Find("name") + " with ID " + fmt.Sprint(wayID) + " and type " + fmt.Sprint(platformType) + " has services:"
 			platformData(strings.Repeat("=", len(data)))
 			platformData(data)
 			platformData(strings.Repeat("=", len(data)))
 		case osm.TypeRelation:
-			data := "Platform " + platformRelations[platformKey.RelationID()].Tags.Find("name") + " with ID " + fmt.Sprint(platformKey.WayID()) + " and type " + fmt.Sprint(platformKey.Type()) + " has services:"
+			relationID, err := platformKey.RelationID()
+			if err != nil {
+				log.Err(err).Msg("determining RelationID of platform " + fmt.Sprint(genericPlatform.ElementID) + " failed since it is not of type relation")
+			}
+			data := "Platform " + platformRelations[relationID].Tags.Find("name") + " with ID " + fmt.Sprint(relationID) + " and type " + fmt.Sprint(platformType) + " has services:"
 			platformData(strings.Repeat("=", len(data)))
 			platformData(data)
 			platformData(strings.Repeat("=", len(data)))
@@ -541,7 +557,10 @@ func calcShortestPath(
 			// log.Debug().Msg("member has type " + fmt.Sprint(member.Type))
 			if member.Type == osm.TypeWay {
 				// if member.Role != "inner" {
-				wayID := member.ElementID().WayID()
+				wayID, err := member.ElementID().WayID()
+				if err != nil {
+					log.Err(err).Msg("determining WayID of platform member" + fmt.Sprint(member.ElementID()) + " failed since it is not of type way")
+				}
 				way := ways[wayID]
 				if way.Tags.Find("railway") == "platform_edge" {
 					log.Debug().Msg("way " + fmt.Sprint(wayID) + " in relation " + fmt.Sprint(platform.ID) + " is platform_edge")
@@ -769,9 +788,16 @@ func correctSpineOrientation(inputSpine models.PlatformSpine, selection models.P
 	log.Debug().Msg("selected platform " + fmt.Sprint(selection.Platform.FeatureID()) + " has next stop " + fmt.Sprint(nextStop.FeatureID()))
 
 	var nextStopPoint orb.Point
-	if nextStop.ElementID().Type() == "node" {
-
-		node := nodes[nextStop.ElementID().NodeID()]
+	nextStopType, err := nextStop.ElementID().Type()
+	if err != nil {
+		log.Err(err).Msg("unknown type for element " + fmt.Sprint(nextStop))
+	}
+	if nextStopType == "node" {
+		nextStopNodeID, err := nextStop.ElementID().NodeID()
+		if err != nil {
+			log.Err(err).Msg("can't get NodeID of next stop since it is not of type node")
+		}
+		node := nodes[nextStopNodeID]
 		nextStopPoint = linebound.NodeToPoint(*node)
 	}
 

@@ -8,7 +8,7 @@ import (
 
 	"github.com/paulmach/orb"
 
-	"github.com/paulmach/osm"
+	"github.com/jkulzer/osm"
 )
 
 type AppContext struct {

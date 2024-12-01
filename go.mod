@@ -6,11 +6,9 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0
 	github.com/fatih/color v1.18.0
 	github.com/paulmach/orb v0.11.1
-	github.com/paulmach/osm v0.8.0
+	github.com/jkulzer/osm v0.9.0
 	gonum.org/v1/gonum v0.15.1
 )
-
-replace github.com/paulmach/osm => ../osm
 
 require (
 	fyne.io/fyne/v2 v2.5.2 // indirect

@@ -10,9 +10,9 @@ import (
 
 	"github.com/jkulzer/osm-test/models"
 
+	"github.com/jkulzer/osm"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geo"
-	"github.com/paulmach/osm"
 
 	"github.com/rs/zerolog/log"
 )

@@ -14,7 +14,7 @@ import (
 	"github.com/jkulzer/osm-test/helpers"
 	"github.com/jkulzer/osm-test/models"
 
-	"github.com/paulmach/osm"
+	"github.com/jkulzer/osm"
 
 	"github.com/rs/zerolog/log"
 )
@@ -132,12 +132,24 @@ func (w *PlatformSelectorWidget) CreateRenderer() fyne.WidgetRenderer {
 func displayService(w *PlatformSelectorWidget, service *osm.Relation, platformID osm.ElementID, content *fyne.Container) {
 	// platform details
 	var platformNumber string
-	switch platformID.Type() {
+	platformType, err := platformID.Type()
+	if err != nil {
+		log.Err(err).Msg("invalid element type detected")
+	}
+	switch platformType {
 	case "way":
-		platformData := w.items.Ways[platformID.WayID()]
+		wayID, err := platformID.WayID()
+		if err != nil {
+			log.Err(err).Msg("determining WayID of platform " + fmt.Sprint(platformID) + " failed since it is not of type way")
+		}
+		platformData := w.items.Ways[wayID]
 		platformNumber = platformData.Tags.Find("ref")
 	case "relation":
-		platformData := w.items.Relations[platformID.RelationID()]
+		relationID, err := platformID.RelationID()
+		if err != nil {
+			log.Err(err).Msg("determining RelationID of platform " + fmt.Sprint(platformID) + " failed since it is not of type relation")
+		}
+		platformData := w.items.Relations[relationID]
 		platformNumber = platformData.Tags.Find("ref")
 	default:
 		log.Warn().Msg("Platform " + fmt.Sprint(platformID) + " is neither way nor relation")
