@@ -475,7 +475,7 @@ func servicesAndPlatforms(
 	sourcePlatformID := <-platformUIList.SourcePlatformChan
 	destPlatformID := <-platformUIList.DestPlatformChan
 
-	calcShortestPath(ctx, nodes, ways, relations, relevantPlatformWays, relevantPlatformRelations, trainTracks, footWays, g, sourcePlatformID, destPlatformID)
+	calcShortestPath(ctx, nodes, ways, relations, trainTracks, footWays, g, sourcePlatformID, destPlatformID)
 }
 
 type GeoJSON struct {
@@ -494,14 +494,15 @@ func calcShortestPath(
 	nodes map[osm.NodeID]*osm.Node,
 	ways map[osm.WayID]*osm.Way,
 	relations map[osm.RelationID]*osm.Relation,
-	relevantPlatformWays mapset.Set[*osm.Way],
-	relevantPlatformRelations mapset.Set[*osm.Relation],
 	trainTracks []orb.Ring,
 	footWays mapset.Set[osm.NodeID],
 	g *simple.WeightedDirectedGraph,
 	sourcePlatformAndService models.PlatformAndServiceSelection,
 	destPlatformAndService models.PlatformAndServiceSelection,
 ) {
+
+	relevantPlatformWays := mapset.NewSet[*osm.Way]()
+	relevantPlatformRelations := mapset.NewSet[*osm.Relation]()
 
 	infiniteLoadingBar := widget.NewProgressBarInfinite()
 	infiniteLoadingBar.Start()
@@ -514,6 +515,40 @@ func calcShortestPath(
 	var targetNodes []osm.NodeID
 
 	platformSpines := make(map[osm.ElementID]models.PlatformSpine)
+
+	sourcePlatformType, err := sourcePlatformAndService.Platform.Type()
+	if sourcePlatformType == "way" {
+		wayID, err := sourcePlatformAndService.Platform.WayID()
+		if err != nil {
+			log.Err(err).Msg("cannot get WayID of " + fmt.Sprint(sourcePlatformAndService.Platform))
+		}
+		relevantPlatformWays.Add(ways[wayID])
+	} else if sourcePlatformType == "relation" {
+		relationID, err := sourcePlatformAndService.Platform.RelationID()
+		if err != nil {
+			log.Err(err).Msg("cannot get RelationID of " + fmt.Sprint(sourcePlatformAndService.Platform))
+		}
+		relevantPlatformRelations.Add(relations[relationID])
+	} else {
+		log.Err(nil).Msg("source platform not of type way or relation")
+	}
+
+	destPlatformType, err := destPlatformAndService.Platform.Type()
+	if destPlatformType == "way" {
+		wayID, err := destPlatformAndService.Platform.WayID()
+		if err != nil {
+			log.Err(err).Msg("cannot get WayID of " + fmt.Sprint(destPlatformAndService.Platform))
+		}
+		relevantPlatformWays.Add(ways[wayID])
+	} else if destPlatformType == "relation" {
+		relationID, err := destPlatformAndService.Platform.RelationID()
+		if err != nil {
+			log.Err(err).Msg("cannot get RelationID of " + fmt.Sprint(destPlatformAndService.Platform))
+		}
+		relevantPlatformRelations.Add(relations[relationID])
+	} else {
+		log.Err(nil).Msg("dest platform not of type way or relation")
+	}
 
 	var allClosePoints []osm.Node
 
@@ -552,19 +587,40 @@ func calcShortestPath(
 		// spine search nodes should only be outers, since inners can confuse the algorithm since it should only be used the the outside of the platform
 		var platformSpineSearchNodes []osm.Node
 
+		var platformNumber string
+		// sourcePlatformAndService models.PlatformAndServiceSelection,
+		if platform.ElementID() == sourcePlatformAndService.Platform {
+			platformNumber, err = getPlatformNumberOfService(sourcePlatformAndService.Platform, nodes, ways, relations, *relations[sourcePlatformAndService.Service])
+			if err != nil {
+				log.Warn().Msg("couldn't get the platform number of service relation/" + fmt.Sprint(sourcePlatformAndService.Service) + " at platform " + fmt.Sprint(sourcePlatformAndService.Platform))
+			}
+		}
+		if platform.ElementID() == destPlatformAndService.Platform {
+			platformNumber, err = getPlatformNumberOfService(destPlatformAndService.Platform, nodes, ways, relations, *relations[destPlatformAndService.Service])
+			if err != nil {
+				log.Warn().Msg("couldn't get the platform number of service relation/" + fmt.Sprint(destPlatformAndService.Service) + " at platform " + fmt.Sprint(destPlatformAndService.Platform))
+			}
+		}
+
 		var platformEdges []*osm.Way
+		foundPlatformEdge := false
 		for _, member := range platform.Members {
-			// log.Debug().Msg("member has type " + fmt.Sprint(member.Type))
 			if member.Type == osm.TypeWay {
-				// if member.Role != "inner" {
 				wayID, err := member.ElementID().WayID()
 				if err != nil {
 					log.Err(err).Msg("determining WayID of platform member" + fmt.Sprint(member.ElementID()) + " failed since it is not of type way")
 				}
 				way := ways[wayID]
-				if way.Tags.Find("railway") == "platform_edge" {
+				// is platform edge and didn't find a matching platform edge already
+				if way.Tags.Find("railway") == "platform_edge" && foundPlatformEdge == false {
 					log.Debug().Msg("way " + fmt.Sprint(wayID) + " in relation " + fmt.Sprint(platform.ID) + " is platform_edge")
-					platformEdges = append(platformEdges, way)
+					// checks if any of the platform numbers are mentioned in a stop_position contained in the service relation with the same name
+					if way.Tags.Find("ref") == platformNumber {
+						foundPlatformEdge = true
+						platformEdges = []*osm.Way{way}
+					} else {
+						platformEdges = append(platformEdges, way)
+					}
 				}
 				for _, wayNode := range way.Nodes {
 					// since way nodes don't have tags i need to find the original node in the map
@@ -574,16 +630,20 @@ func calcShortestPath(
 						platformSpineSearchNodes = append(platformSpineSearchNodes, *node)
 					}
 				}
-				// }
 			}
 		}
 
 		if platformEdges == nil {
 			linebound.SetPlatformSpine(ctx, platformSpineSearchNodes, platformSpines, trainTracks, nodes, platform.ElementID(), &allClosePoints)
 		} else {
-			log.Debug().Msg(fmt.Sprint(platformEdges))
-			ui.ShowPlatformEdgeSelector(ctx.Window, platformEdges)
-			platformEdgeToUse := platformEdges[0]
+			var platformEdgeToUse osm.Way
+			if len(platformEdges) == 1 {
+				platformEdgeToUse = *platformEdges[0]
+			} else {
+				platformEdgeToUseChan := make(chan osm.Way)
+				ui.ShowPlatformEdgeSelector(ctx.Window, platformEdges, platformEdgeToUseChan)
+				platformEdgeToUse = <-platformEdgeToUseChan
+			}
 			var edgeSpine models.PlatformSpine
 			edgeSpine.Start = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[0].ID])
 			edgeSpine.End = linebound.NodeToPoint(*nodes[platformEdgeToUse.Nodes[len(platformEdgeToUse.Nodes)-1].ID])
@@ -824,4 +884,81 @@ func correctSpineOrientation(inputSpine models.PlatformSpine, selection models.P
 	log.Debug().Msg("updated platform spine: " + fmt.Sprint(inputSpine))
 
 	return inputSpine
+}
+
+func getPlatformNumberOfService(platformID osm.ElementID, nodes map[osm.NodeID]*osm.Node, ways map[osm.WayID]*osm.Way, relations map[osm.RelationID]*osm.Relation, service osm.Relation) (string, error) {
+	platformType, err := platformID.Type()
+	if err != nil {
+		log.Err(err).Msg("platform " + fmt.Sprint(platformID) + " has unknown type")
+	}
+
+	var platformName string
+
+	switch platformType {
+	case "way":
+		wayID, err := platformID.WayID()
+		if err != nil {
+			log.Err(err).Msg("platform " + fmt.Sprint(platformID) + " is of type way but does not have a WayID")
+		}
+		platform := ways[wayID]
+		platformName = platform.Tags.Find("name")
+	case "relation":
+		relationID, err := platformID.RelationID()
+		if err != nil {
+			log.Err(err).Msg("platform " + fmt.Sprint(platformID) + " is of type relation but does not have a RelationID")
+		}
+		platform := relations[relationID]
+		platformName = platform.Tags.Find("name")
+	default:
+		errorMessage := "platform " + fmt.Sprint(platformID) + " is neither way or relation"
+		log.Err(nil).Msg(errorMessage)
+		return "", errors.New(errorMessage)
+	}
+	if platformName == "" {
+		errorMessage := "platform " + fmt.Sprint(platformID) + " has no name"
+		err := errors.New(errorMessage)
+		log.Err(err).Msg(errorMessage)
+		return "", err
+	}
+
+	var stopPosition *osm.Node
+	log.Debug().Msg("searching for stop position with name " + platformName)
+	for _, member := range service.Members {
+		if member.Type == "node" {
+			nodeID, err := member.ElementID().NodeID()
+			if err != nil {
+				log.Err(err).Msg("member " + fmt.Sprint(member.ElementID()) + " is of type node but does not have a node id")
+			}
+			stopPosition = nodes[nodeID]
+			if stopPosition == nil {
+				log.Debug().Msg("node " + fmt.Sprint(nodeID) + " cannot be found in nodes map")
+			} else {
+				stopPositionName := stopPosition.Tags.Find("name")
+				log.Debug().Msg("stop position id: " + fmt.Sprint(stopPosition.ElementID()) + " with name " + fmt.Sprint(stopPositionName))
+				if stopPositionName == platformName {
+					break
+				}
+			}
+		}
+	}
+
+	var platformNumberString string
+
+	ref := stopPosition.Tags.Find("ref")
+	localRef := stopPosition.Tags.Find("local_ref")
+
+	// the local_ref tag is preferred to the ref tag since the ref tag sometimes containers global identification and only the local_ref tag would provide just the local platform numbers
+	if ref == "" && localRef == "" {
+		errMessage := "no platform numbers found in stop position " + fmt.Sprint(stopPosition.ElementID()) + " for platform " + fmt.Sprint(platformID)
+		log.Err(err).Msg(errMessage)
+		return "", errors.New(errMessage)
+	} else if localRef != "" {
+		platformNumberString = localRef
+	} else if localRef == "" && ref != "" {
+		platformNumberString = ref
+	} else {
+		log.Err(nil).Msg("this shouldn't be reachable")
+	}
+
+	return platformNumberString, nil
 }

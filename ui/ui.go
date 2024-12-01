@@ -236,14 +236,17 @@ func ShowFilePicker(w fyne.Window, reader chan (fyne.URIReadCloser), returnError
 	filePicker.Show()
 }
 
-func ShowPlatformEdgeSelector(w fyne.Window, platformEdges []*osm.Way) {
+func ShowPlatformEdgeSelector(w fyne.Window, platformEdges []*osm.Way, selectedPlatformEdgeChan chan (osm.Way)) {
 	var customDialog *dialog.CustomDialog
 	content := container.NewVBox()
 	for edgeIndex, edge := range platformEdges {
 		edgePlatformNumber := edge.Tags.Find("ref")
 		edgeEntry := widget.NewButton(edgePlatformNumber, func() {
-			log.Info().Msg("selected platform edge " + edgePlatformNumber + " with slice index " + fmt.Sprint(edgeIndex))
-			customDialog.Hide()
+			go func() {
+				log.Info().Msg("selected platform edge " + edgePlatformNumber + " with slice index " + fmt.Sprint(edgeIndex))
+				selectedPlatformEdgeChan <- *edge
+				customDialog.Hide()
+			}()
 		})
 		content.Add(edgeEntry)
 	}
