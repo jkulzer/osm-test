@@ -639,6 +639,7 @@ func calcShortestPath(
 			var platformEdgeToUse osm.Way
 			if len(platformEdges) == 1 {
 				platformEdgeToUse = *platformEdges[0]
+				log.Info().Msg("selected platform number " + fmt.Sprint(platformEdgeToUse.Tags.Find("ref")) + " for platform " + fmt.Sprint(platform.ElementID()))
 			} else {
 				platformEdgeToUseChan := make(chan osm.Way)
 				ui.ShowPlatformEdgeSelector(ctx.Window, platformEdges, platformEdgeToUseChan)
