@@ -11,8 +11,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/jkulzer/osm-test/helpers"
-	"github.com/jkulzer/osm-test/models"
+	"github.com/jkulzer/platform-router/helpers"
+	"github.com/jkulzer/platform-router/models"
 
 	"github.com/jkulzer/osm"
 

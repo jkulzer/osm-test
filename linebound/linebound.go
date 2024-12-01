@@ -8,7 +8,7 @@ import (
 
 	"github.com/golang/geo/s2"
 
-	"github.com/jkulzer/osm-test/models"
+	"github.com/jkulzer/platform-router/models"
 
 	"github.com/jkulzer/osm"
 	"github.com/paulmach/orb"

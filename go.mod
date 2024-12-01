@@ -1,4 +1,4 @@
-module github.com/jkulzer/osm-test
+module github.com/jkulzer/platform-router
 
 go 1.22.7
 
