@@ -2,10 +2,10 @@ package main
 
 import (
 	"github.com/golang/geo/s2"
-	"io"
 
 	"encoding/json"
 	"errors"
+	"io"
 
 	"context"
 	"fmt"
@@ -506,7 +506,9 @@ func calcShortestPath(
 
 	infiniteLoadingBar := widget.NewProgressBarInfinite()
 	infiniteLoadingBar.Start()
-	loadingContainer := container.NewCenter(infiniteLoadingBar)
+	loadingContainer := ui.NewLoadingScreenWithTextWidget()
+	loadingContainer.SetText("picking out relevant platform data")
+	// container.NewCenter(infiniteLoadingBar)
 	ctx.Tabs.Items[2].Content = loadingContainer
 	ctx.Tabs.EnableIndex(2)
 	ctx.Tabs.SelectIndex(2)
@@ -550,6 +552,8 @@ func calcShortestPath(
 		log.Err(nil).Msg("dest platform not of type way or relation")
 	}
 
+	loadingContainer.SetText("checking closeness of platform to rails")
+
 	var allClosePoints []osm.Node
 
 	closenessStart := time.Now()
@@ -581,6 +585,7 @@ func calcShortestPath(
 			}
 		}
 	}
+	loadingContainer.SetText("getting platform numbers")
 	for platform := range relevantPlatformRelations.Iterator().C {
 		// point nodes are all points on the platform. also includes inners, since that is an okay destination
 		var platformPointNodes []osm.Node
@@ -699,21 +704,9 @@ func calcShortestPath(
 	log.Info().Msg("source nodes: " + fmt.Sprint(sourceNodes))
 	log.Info().Msg("target nodes: " + fmt.Sprint(targetNodes))
 
-	var shortestPath []graph.Node
-	var shortestWeight float64
+	loadingContainer.SetText("calculating shortest path")
 
-	for _, sourceID := range sourceNodes {
-		// Compute the shortest path tree from the source node
-		shortest := path.DijkstraFrom(g.Node(int64(sourceID)), g)
-
-		// Extract shortest paths to the destination nodes
-		for _, destID := range targetNodes {
-			if path, weight := shortest.To(int64(destID)); len(path) > 0 {
-				shortestPath = path
-				shortestWeight = weight
-			}
-		}
-	}
+	shortestPath, shortestWeight := shortestPathBetweenArrayOfNodes(sourceNodes, targetNodes, g, loadingContainer)
 	fmt.Printf("Shortest path: %v (weight: %v)\n", shortestPath, shortestWeight)
 
 	var sourceExit osm.Node
@@ -732,6 +725,7 @@ func calcShortestPath(
 	elapsed = time.Since(routingTime)
 	log.Printf("Routing took %s", elapsed)
 	outputTime := time.Now()
+	loadingContainer.SetText("formatting output")
 
 	sourceSpine := platformSpines[sourcePlatformAndService.Platform]
 	destSpine := platformSpines[destPlatformAndService.Platform]
@@ -962,4 +956,25 @@ func getPlatformNumberOfService(platformID osm.ElementID, nodes map[osm.NodeID]*
 	}
 
 	return platformNumberString, nil
+}
+
+func shortestPathBetweenArrayOfNodes(sourceNodes []osm.NodeID, targetNodes []osm.NodeID, g *simple.WeightedDirectedGraph, loadingContainer *ui.LoadingScreenWithTextWidget) ([]graph.Node, float64) {
+	var shortestPath []graph.Node
+	var shortestWeight float64
+	totalRouteAmount := len(sourceNodes) * len(targetNodes)
+	for sourceIndex, sourceID := range sourceNodes {
+		// Compute the shortest path tree from the source node
+		shortest := path.DijkstraFrom(g.Node(int64(sourceID)), g)
+
+		// Extract shortest paths to the destination nodes
+		for destIndex, destID := range targetNodes {
+			if path, weight := shortest.To(int64(destID)); len(path) > 0 {
+				shortestPath = path
+				shortestWeight = weight
+			}
+			currentRouteIndex := (sourceIndex + 1) * (destIndex + 1)
+			loadingContainer.SetText("calculating route: " + fmt.Sprint(currentRouteIndex) + "/" + fmt.Sprint(totalRouteAmount))
+		}
+	}
+	return shortestPath, shortestWeight
 }

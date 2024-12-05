@@ -253,3 +253,32 @@ func ShowPlatformEdgeSelector(w fyne.Window, platformEdges []*osm.Way, selectedP
 	customDialog = dialog.NewCustomWithoutButtons("Select platform edge:", content, w)
 	customDialog.Show()
 }
+
+type LoadingScreenWithTextWidget struct {
+	widget.BaseWidget
+	loadingBar    *widget.ProgressBarInfinite
+	infoTextLabel *widget.Label
+	content       *fyne.Container
+}
+
+func NewLoadingScreenWithTextWidget() *LoadingScreenWithTextWidget {
+	w := &LoadingScreenWithTextWidget{}
+	w.ExtendBaseWidget(w)
+	return w
+}
+
+func (w *LoadingScreenWithTextWidget) CreateRenderer() fyne.WidgetRenderer {
+	w.content = container.NewVBox()
+	w.infoTextLabel = widget.NewLabel("Loading...")
+	return widget.NewSimpleRenderer(w.infoTextLabel)
+}
+
+func (w *LoadingScreenWithTextWidget) SetText(inputText string) {
+	log.Info().Msg(inputText)
+	if w.infoTextLabel == nil {
+		w.infoTextLabel = widget.NewLabel(inputText)
+	} else {
+		w.infoTextLabel.SetText(inputText)
+	}
+	w.Refresh()
+}
